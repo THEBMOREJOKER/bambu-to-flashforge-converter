@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Click-to-run for the app. Brings the page up if it is not already answering, then opens it in the browser, so
+# clicking twice opens a second tab rather than failing on a busy port. Needs no terminal and no sudo.
+set -u
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+PORT="${B2F_PORT:-8770}"
+URL="http://127.0.0.1:${PORT}/"
+NODE="${B2F_NODE:-$(command -v node)}"
+LOG="${XDG_CACHE_HOME:-$HOME/.cache}/b2f.log"
+
+answering() { curl -fsS --max-time 1 -o /dev/null "$URL" 2>/dev/null; }
+
+if ! answering; then
+  [ -n "$NODE" ] && [ -x "$NODE" ] || { echo "no node found: install Node.js 24+ or set B2F_NODE" >&2; exit 1; }
+  [ -f "$ROOT/dist/src/cli.js" ] || { echo "not built: run npm install && npm run build in $ROOT" >&2; exit 1; }
+  mkdir -p "$(dirname "$LOG")"
+  date >> "$LOG"
+  ( cd "$ROOT" && nohup "$NODE" dist/src/cli.js gui --port "$PORT" >> "$LOG" 2>&1 & )
+  # wait for it to answer without sleeping: curl retries a refused connection
+  curl -fsS --retry 40 --retry-delay 0 --retry-connrefused --max-time 20 -o /dev/null "$URL" 2>/dev/null \
+    || { echo "the app did not come up — see $LOG" >&2; exit 1; }
+fi
+
+[ -n "${B2F_NO_OPEN:-}" ] && exit 0
+exec xdg-open "$URL"
