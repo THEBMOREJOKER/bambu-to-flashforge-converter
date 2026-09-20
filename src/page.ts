@@ -233,6 +233,10 @@ function renderResult(r) {
       box.appendChild(el("div", "line warn", d + " — taken out; a pause there is yours to ask for"));
     }
   }
+  if (r.plateNames && r.plateNames.length) {
+    box.appendChild(el("h2", null, "plate names — taken out of the copy the slicer read"));
+    for (const n of r.plateNames) box.appendChild(el("div", "line", n));
+  }
   if (!r.checks || !r.checks.length) {
     const line = el("div", "line bad");
     line.appendChild(el("span", "s", "✗"));
@@ -242,7 +246,7 @@ function renderResult(r) {
       const retry = el("button", "go", "retry from the mesh alone");
       retry.onclick = function () { slice(true); };
       box.appendChild(retry);
-      box.appendChild(el("div", "line", "per-object settings, modifiers, painted supports and layer changes in the project are not carried; the log names what was lost"));
+      box.appendChild(el("div", "line", "an object made of several parts comes out as one piece; per-object settings, modifiers, painted supports and layer changes in the project are not carried; the log names what was lost"));
     }
     return;
   }

@@ -151,6 +151,10 @@ async function cmdConvert(argv: string[]): Promise<number> {
     for (const d of result.collapsed.dropped) console.log(warn(`${d}: taken out; add a pause there in Flash Studio if you want the colour change`));
   }
   for (const k of result.collapsed?.kept ?? []) console.log(warn(`the project's ${k} is kept`));
+  if (result.plateNames?.length) {
+    console.log("plate names — taken out of the copy the slicer read, its command line crashes on a named plate:");
+    for (const n of result.plateNames) console.log(`  ${n}`);
+  }
   if (result.droppedKeys?.length) console.log(warn(`dropped out-of-range keys: ${result.droppedKeys.join(", ")}`));
   for (const n of result.notCarried ?? []) console.log(warn(`not carried from the project: ${n}`));
   if (!result.plates.length) {

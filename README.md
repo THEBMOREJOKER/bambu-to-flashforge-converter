@@ -24,7 +24,9 @@ b2f convert ~/3dprint/in/model.3mf    →    ~/3dprint/out/model-ad5m.3mf    →
   unknown preset, so it is refused. `--filament` takes any other name Flash Studio lists for the 5M 0.4.
 - **Drops the values a newer Bambu Studio writes that Flash Studio refuses**, such as `wall_filament = 0` and
   `raft_first_layer_expansion = -1`, from a copy of the project, then runs again once. The preset fills them in.
-- **Keeps the model:** objects, transforms, modifiers and per-object settings ride along. Parts are re-arranged
+- **Takes plate names out.** Flash Studio's command line crashes on a project whose plate has a name. The names are
+  blanked in the copy the slicer reads and printed, by plate, so you still know which plate the designer meant.
+- **Keeps the model:** objects, their separate parts, transforms, modifiers and per-object settings ride along. Parts are re-arranged
   onto the 5M's centred bed.
 - **Prints the designer's notes.** A project often says "0.2 mm, no supports, figure at 0% infill" in its
   description, and no setting in the file encodes that. Read it before you slice.
@@ -94,7 +96,7 @@ Options for `convert`:
 | `--scale F` | uniform scale, only when you ask for it. `inspect` reports a part larger than the 220 mm bed, and the check fails a plate that leaves it |
 | `--plate N` | one plate (default: all) |
 | `--name STEM`, `--out DIR` | output name and folder |
-| `--from-mesh` | slice the project's mesh taken out whole, for a project file Flash Studio's command line crashes on. Per-object settings, modifiers, painted supports and layer changes do not travel, and the tool names what was lost |
+| `--from-mesh` | slice the project's mesh taken out whole, for a project file Flash Studio's command line crashes on. An object made of several parts comes out as one piece; per-object settings, modifiers, painted supports and layer changes do not travel, and the tool names what was lost |
 | `--keep` | keep the temporary folder |
 
 Other commands:

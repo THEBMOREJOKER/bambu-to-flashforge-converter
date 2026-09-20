@@ -23,8 +23,8 @@ import { check, type CheckResult } from "./gcode.js";
 import { plateMap, type PlateMap } from "./platemap.js";
 import { split } from "./split.js";
 import {
-  type Collapse, collapseFilaments, type Notes, notes, type ObjectSetting, objectSettings, outOfRangeKeys,
-  modelSettings, oneSlot, type OneSlot, projectSettings, sliceWarnings, unslicedChanges,
+  blankPlateNames, type Collapse, collapseFilaments, type Notes, notes, type ObjectSetting, objectSettings,
+  outOfRangeKeys, modelSettings, oneSlot, type OneSlot, projectSettings, sliceWarnings, unslicedChanges,
 } from "./threemf.js";
 import { copyZipWith } from "./zipwrite.js";
 import { Zip } from "./zip.js";
@@ -79,7 +79,9 @@ export interface ConvertResult {
   droppedKeys?: string[];
   /** What was changed so the project prints from the 5M's one extruder. */
   collapsed?: Omit<Collapse, "members">;
-  /** Objects whose own settings did not travel when the mesh was taken out whole. */
+  /** Plate names taken out of the copy the slicer read: its command line crashes on a named plate. */
+  plateNames?: string[];
+  /** What did not travel when the mesh was taken out whole: an object's own settings, and its separate parts. */
   notCarried?: string[];
   /** What to do next when this did not work. */
   advice?: string;
@@ -193,12 +195,15 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   let collapse: Collapse | null = null;
   let modelXml: string | null = null;
   let carried: ObjectSetting[] = [];
+  let merged: ObjectSetting[] = [];
   if (isProject) {
     const zip = new Zip(first);
     try {
       projectNotes = notes(zip);
       if (fromMesh) {
-        carried = objectSettings(zip).filter((o) => Object.keys(o.settings).length);
+        const objects = objectSettings(zip);
+        carried = objects.filter((o) => Object.keys(o.settings).length);
+        merged = objects.filter((o) => o.parts > 1);
       } else {
         project = projectSettings(zip);
         collapse = collapseFilaments(zip);
@@ -213,7 +218,11 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
 
   // The way round a project file the slicer crashes on: every object written whole as an STL, and those sliced.
   let sliceInputs = inputs;
-  const notCarried = carried.map((o) => `${o.name || `object ${o.objectId}`}: ${Object.keys(o.settings).join(", ")}`);
+  const notCarried = [
+    ...carried.map((o) => `${o.name || `object ${o.objectId}`}: ${Object.keys(o.settings).join(", ")}`),
+    // One mesh per object: parts the project kept apart are one piece in Flash Studio, where they sat.
+    ...merged.map((o) => `${o.name || `object ${o.objectId}`}: its ${o.parts} parts become one piece`),
+  ];
   if (fromMesh) {
     options.onLine?.("taking the mesh out of the project whole — the slicer crashed on the project file, not on its geometry");
     for (const n of notCarried) options.onLine?.(`not carried: ${n}`);
@@ -238,11 +247,19 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     slots = 1;
   }
 
-  // The slicer is handed a copy whenever the project has to change: slots collapsed, refused keys taken out.
+  // The slicer's command line crashes on a plate that has a name, so the names come out of the copy it reads.
+  const plateNames = modelXml ? blankPlateNames(modelXml).names : [];
+
+  // The slicer is handed a copy whenever the project has to change: slots collapsed, plate names and refused keys
+  // taken out.
   const cleanedPath = join(work, `${stem}-cleaned-input.3mf`);
   const writeCleaned = (dropKeys: string[]): string => {
     const changes: Record<string, Buffer | null> = { ...(collapse?.members ?? {}) };
     if (single?.modelXml) changes["Metadata/model_settings.config"] = Buffer.from(single.modelXml);
+    if (plateNames.length) {
+      const current = changes["Metadata/model_settings.config"]?.toString("utf8") ?? modelXml ?? "";
+      changes["Metadata/model_settings.config"] = Buffer.from(blankPlateNames(current).xml);
+    }
     if ((dropKeys.length || single) && project) {
       const settings = { ...(single?.settings ?? project) };
       for (const key of dropKeys) delete settings[key];
@@ -259,12 +276,13 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   const collapsed = collapse && (collapse.moved.length || collapse.dropped.length || collapse.kept.length)
     ? { moved: collapse.moved, dropped: collapse.dropped, kept: collapse.kept }
     : undefined;
-  if (single || (collapse && Object.keys(collapse.members).length)) {
+  if (single || plateNames.length || (collapse && Object.keys(collapse.members).length)) {
     sliceInputs = [writeCleaned([])];
     for (const m of collapse?.moved ?? []) options.onLine?.(`one extruder: ${m}`);
     for (const d of collapse?.dropped ?? []) options.onLine?.(`one extruder: the project's ${d} is taken out — add a pause there in Flash Studio if you want the colour change`);
   }
   for (const k of collapse?.kept ?? []) options.onLine?.(`the project's ${k} is kept`);
+  for (const n of plateNames) options.onLine?.(`plate name taken out of the copy the slicer reads, its command line crashes on one — ${n}`);
 
   const exported = `${stem}-ad5m.3mf`;
   const command = [
@@ -289,6 +307,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     overrides: applied,
     command,
     ...(collapsed ? { collapsed } : {}),
+    ...(plateNames.length ? { plateNames } : {}),
     ...(notCarried.length ? { notCarried } : {}),
   };
   const finish = (keep: boolean): boolean => {

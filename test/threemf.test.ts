@@ -10,8 +10,8 @@ import { after, test } from "node:test";
 
 import { withZip } from "../src/zip.js";
 import {
-  cleanNote, collapseFilaments, firstSlot, notes, objectSettings, outOfRangeKeys, projectSettings, sliceWarnings,
-  oneSlot, unslicedChanges,
+  blankPlateNames, cleanNote, collapseFilaments, firstSlot, notes, objectSettings, oneSlot, outOfRangeKeys,
+  projectSettings, sliceWarnings, unslicedChanges,
 } from "../src/threemf.js";
 import { copyZipWith, writeZip } from "../src/zipwrite.js";
 
@@ -91,6 +91,56 @@ test("a project on slot 10 with a tool change collapses onto slot 1", () => {
     assert.doesNotMatch(layers, /tool_change/);
     assert.match(layers, /type="1"/);
     assert.match(layers, /<mode value="MultiAsSingle"\/>/);
+  });
+});
+
+// A designer who names a plate: Flash Studio's command line crashes on one.
+const PLATES = `<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <object id="3">
+    <metadata key="name" value="Assembly"/>
+    <metadata key="extruder" value="3"/>
+    <part id="1" subtype="normal_part">
+      <metadata key="name" value="shell"/>
+    </part>
+    <part id="2" subtype="normal_part">
+      <metadata key="name" value="spiral"/>
+    </part>
+  </object>
+  <plate>
+    <metadata key="plater_id" value="1"/>
+    <metadata key="plater_name" value="B. by layer 36 x 65 mm"/>
+    <metadata key="locked" value="false"/>
+  </plate>
+  <plate>
+    <metadata key="plater_id" value="2"/>
+    <metadata key="plater_name" value=""/>
+  </plate>
+  <plate>
+    <metadata key="plater_id" value="3"/>
+    <metadata key="plater_name" value="lid &amp; base"/>
+  </plate>
+</config>`;
+
+test("a named plate loses its name, and the name is said", () => {
+  const r = blankPlateNames(PLATES);
+  assert.deepEqual(r.names, ["plate 1: B. by layer 36 x 65 mm", "plate 3: lid & base"]);
+  // Nothing but the two names changed.
+  assert.equal(r.xml, PLATES.replace("B. by layer 36 x 65 mm", "").replace("lid &amp; base", ""));
+});
+
+test("a project with no named plate is left as it is", () => {
+  const plain = blankPlateNames(PLATES).xml;
+  assert.deepEqual(blankPlateNames(plain), { xml: plain, names: [] });
+  assert.deepEqual(blankPlateNames(MODEL_SETTINGS), { xml: MODEL_SETTINGS, names: [] });
+});
+
+test("an object's parts are counted, so a mesh taken out whole can say what it makes one piece", () => {
+  withZip(projectWith({ "Metadata/model_settings.config": PLATES }), (zip) => {
+    assert.deepEqual(objectSettings(zip).map((o) => `${o.name}: ${o.parts}`), ["Assembly: 2"]);
+  });
+  withZip(projectWith({ "Metadata/model_settings.config": MODEL_SETTINGS }), (zip) => {
+    assert.deepEqual(objectSettings(zip).map((o) => o.parts), [2, 0]);
   });
 });
 

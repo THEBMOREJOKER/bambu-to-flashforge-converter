@@ -85,6 +85,8 @@ export interface ObjectSetting {
   objectId: string;
   name: string;
   extruder: string;
+  /** How many parts the object is made of. Taken out as a mesh, they become one piece. */
+  parts: number;
   /** Per-object overrides the GUI and the converter care about, e.g. sparse_infill_density. */
   settings: Record<string, string>;
 }
@@ -105,9 +107,30 @@ export function objectSettings(zip: Zip): ObjectSetting[] {
       settings[k[1] ?? ""] = k[2] ?? "";
     }
     const { name = "", extruder = "", ...rest } = settings;
-    out.push({ objectId: id, name, extruder, settings: rest });
+    out.push({ objectId: id, name, extruder, parts: body.match(/<part\b/g)?.length ?? 0, settings: rest });
   }
   return out;
+}
+
+export interface PlateNames { xml: string; names: string[]; }
+
+/**
+ * Flash Studio 1.7.9's command line dies on a plate that has a name: a segfault straight after the plate is
+ * created, every time, and the same copy with only the name blanked slices clean. A name is a label and changes
+ * nothing about the print, so it comes out of the copy the slicer reads — and is said, because a designer who names
+ * plates is telling you which one is which.
+ */
+export function blankPlateNames(modelXml: string): PlateNames {
+  const names: string[] = [];
+  const xml = modelXml.replace(/<plate\b[^>]*>[\s\S]*?<\/plate>/g, (plate: string) => {
+    const id = /<metadata key="plater_id" value="([^"]*)"/.exec(plate)?.[1] || "?";
+    return plate.replace(/(<metadata key="plater_name" value=")([^"]*)(")/, (whole: string, head: string, name: string, tail: string) => {
+      if (!name) return whole;
+      names.push(`plate ${id}: ${unescapeOnce(name)}`);
+      return `${head}${tail}`;
+    });
+  });
+  return { xml, names };
 }
 
 export interface Collapse {
