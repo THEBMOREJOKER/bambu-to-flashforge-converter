@@ -26,6 +26,10 @@ b2f convert ~/3dprint/in/model.3mf    →    ~/3dprint/out/model-ad5m.3mf    →
   `raft_first_layer_expansion = -1`, from a copy of the project, then runs again once. The preset fills them in.
 - **Takes plate names out.** Flash Studio's command line crashes on a project whose plate has a name. The names are
   blanked in the copy the slicer reads and printed, by plate, so you still know which plate the designer meant.
+- **Takes a second kind of nozzle out.** From Bambu Studio 2.04 a P1S project names two kinds of nozzle, Standard and
+  High Flow, and keeps its filament lists per slot per kind. Flash Studio's command line crashes on those lists for
+  the 5M's one nozzle, so when a project names more than one kind, the lists come out of the copy the slicer reads and
+  are printed. The slicer fills in its own one-kind values.
 - **Keeps the model:** objects, their separate parts, transforms, modifiers and per-object settings ride along. Parts are re-arranged
   onto the 5M's centred bed.
 - **Prints the designer's notes.** A project often says "0.2 mm, no supports, figure at 0% infill" in its

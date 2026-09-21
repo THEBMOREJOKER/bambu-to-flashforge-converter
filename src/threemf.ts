@@ -251,6 +251,43 @@ export function oneSlot(
   return { settings: out, modelXml: xml, from: n };
 }
 
+// Bambu's bookkeeping for a machine that takes more than one kind of nozzle: the kinds, and entries per slot per kind.
+const VARIANT_KEYS = [
+  "extruder_ams_count", "extruder_variant_list", "filament_extruder_variant", "filament_nozzle_map",
+  "filament_self_index", "filament_volume_map", "print_extruder_id", "print_extruder_variant", "printer_extruder_id",
+  "printer_extruder_variant",
+];
+
+export interface Variants {
+  /** The kinds of nozzle the project names (Bambu's "extruder variants"). */
+  kinds: string[];
+  /** The keys that come out of the copy the slicer reads. */
+  keys: string[];
+}
+
+/**
+ * From Bambu Studio 2.04 a P1S project names two kinds of nozzle, Standard and High Flow, and keeps its filament
+ * lists one entry per slot per kind: eight for four slots. The 5M's presets name no kinds at all, so the project's
+ * lists reach the slicer as they are; Flash Studio 1.7.9's command line takes the 5M for a machine with two kinds of
+ * extruder and dies pairing them with the one filament left after the collapse — a segfault in
+ * update_values_to_printer_extruders_for_multiple_filaments, or earlier, before the filament presets load, on a
+ * project with many slots. A project that names one kind (Bambu Studio 2.00, 2.02) or none (1.10) converts as it is
+ * and is left alone. With two or more, these keys come out of the copy the slicer reads, the slicer writes its own
+ * one-kind values in their place, and what came out is said. Keys a flattened preset carries stay: the slicer
+ * replaces those anyway.
+ */
+export function extruderVariants(settings: ProjectSettings, presetKeys: Set<string>): Variants {
+  const kinds = new Set<string>();
+  for (const key of ["printer_extruder_variant", "print_extruder_variant", "filament_extruder_variant", "extruder_variant_list"]) {
+    const value = settings[key];
+    for (const entry of Array.isArray(value) ? value : value ? [value] : []) {
+      for (const kind of entry.split(",")) if (kind.trim()) kinds.add(kind.trim());
+    }
+  }
+  const keys = kinds.size > 1 ? VARIANT_KEYS.filter((key) => key in settings && !presetKeys.has(key)) : [];
+  return { kinds: [...kinds], keys };
+}
+
 /** What the slicer said about the plates it sliced, out of Metadata/slice_info.config. */
 export function sliceWarnings(zip: Zip): string[] {
   const name = "Metadata/slice_info.config";

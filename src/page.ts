@@ -237,6 +237,11 @@ function renderResult(r) {
     box.appendChild(el("h2", null, "plate names — taken out of the copy the slicer read"));
     for (const n of r.plateNames) box.appendChild(el("div", "line", n));
   }
+  if (r.variants && r.variants.keys.length) {
+    box.appendChild(el("h2", null, "nozzle kinds — taken out of the copy the slicer read"));
+    box.appendChild(el("div", "line", "the project names " + r.variants.kinds.join(" and ") + "; the 5M has one"));
+    box.appendChild(el("div", "line", r.variants.keys.join(", ")));
+  }
   if (!r.checks || !r.checks.length) {
     const line = el("div", "line bad");
     line.appendChild(el("span", "s", "✗"));

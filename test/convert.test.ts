@@ -76,3 +76,40 @@ test("a project with a named plate is handed to the slicer without the name, its
       if (work) rmSync(work, { recursive: true, force: true });
     }
   });
+
+// From Bambu Studio 2.04 a P1S project names two kinds of nozzle, and Flash Studio's command line dies on their
+// lists for the 5M's one. Needs Flash Studio installed. They come out of the copy it reads; the rest of the settings stay.
+const TWO_KINDS = {
+  filament_settings_id: ["Bambu PLA Basic @BBL P1S 0.4 nozzle"],
+  printer_extruder_variant: ["Direct Drive Standard", "Direct Drive High Flow"],
+  extruder_variant_list: ["Direct Drive Standard,Direct Drive High Flow"],
+  filament_extruder_variant: ["Direct Drive Standard", "Direct Drive High Flow"],
+  filament_self_index: ["1", "1"],
+  seam_position: "back",
+};
+
+test("a project naming two kinds of nozzle is handed to the slicer without their lists",
+  { skip: !existsSync(APPIMAGE) || !existsSync(MACHINE_JSON) }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "b2f-test-"));
+    let work = "";
+    try {
+      const project = join(dir, "kinds.3mf");
+      writeZip(project, [{ name: "Metadata/project_settings.config", data: Buffer.from(JSON.stringify(TWO_KINDS)) }]);
+      const r = await convert({ inputs: [project], dryRun: true, keep: true, out: dir });
+      work = r.work;
+      assert.deepEqual(r.variants, {
+        kinds: ["Direct Drive Standard", "Direct Drive High Flow"],
+        keys: ["extruder_variant_list", "filament_extruder_variant", "filament_self_index", "printer_extruder_variant"],
+      });
+      const handed = r.command[r.command.length - 1] ?? "";
+      assert.match(handed, /kinds-cleaned-input\.3mf$/);
+      withZip(handed, (zip) => {
+        assert.deepEqual(zip.readJson("Metadata/project_settings.config"), {
+          filament_settings_id: ["Bambu PLA Basic @BBL P1S 0.4 nozzle"], seam_position: "back",
+        });
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      if (work) rmSync(work, { recursive: true, force: true });
+    }
+  });

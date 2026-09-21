@@ -1,7 +1,7 @@
 /**
  * Driving Flash Studio's own command line, with the things it needs done for it: presets flattened (its CLI does not
  * walk an `inherits` chain), the keys a newer Bambu Studio writes out of range taken out of a cleaned copy, every
- * filament slot loaded over, and the project collapsed onto the 5M's one extruder.
+ * filament slot loaded over, and the project collapsed onto the 5M's one extruder and its one kind of nozzle.
  *
  * The slicer works in a throwaway folder. What comes out is one file: the project for Flash Studio, without G-code,
  * in the out folder — and only when the slice made from it passed the check. Flash Studio slices it again and
@@ -23,8 +23,9 @@ import { check, type CheckResult } from "./gcode.js";
 import { plateMap, type PlateMap } from "./platemap.js";
 import { split } from "./split.js";
 import {
-  blankPlateNames, type Collapse, collapseFilaments, type Notes, notes, type ObjectSetting, objectSettings,
-  outOfRangeKeys, modelSettings, oneSlot, type OneSlot, projectSettings, sliceWarnings, unslicedChanges,
+  blankPlateNames, type Collapse, collapseFilaments, extruderVariants, type Notes, notes, type ObjectSetting,
+  objectSettings, outOfRangeKeys, modelSettings, oneSlot, type OneSlot, projectSettings, sliceWarnings,
+  unslicedChanges, type Variants,
 } from "./threemf.js";
 import { copyZipWith } from "./zipwrite.js";
 import { Zip } from "./zip.js";
@@ -81,6 +82,8 @@ export interface ConvertResult {
   collapsed?: Omit<Collapse, "members">;
   /** Plate names taken out of the copy the slicer read: its command line crashes on a named plate. */
   plateNames?: string[];
+  /** Nozzle kinds taken out of the copy the slicer read: it dies on a project that names two for the 5M's one. */
+  variants?: Variants;
   /** What did not travel when the mesh was taken out whole: an object's own settings, and its separate parts. */
   notCarried?: string[];
   /** What to do next when this did not work. */
@@ -236,22 +239,29 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   const applied = options.overrides?.length ? applyOverrides(flatProcess.file, options.overrides) : [];
   if (project) replaced = settingsDiff(project, JSON.parse(readFileSync(flatProcess.file, "utf8")) as Record<string, unknown>);
 
+  const keysOf = (file: string) => new Set(Object.keys(JSON.parse(readFileSync(file, "utf8")) as object));
+  const presetKeys = new Set([...keysOf(machine.file), ...keysOf(flatProcess.file)]);
+  const filamentKeys = keysOf(filament.file);
+
   // One extruder, one slot: every per-slot list cut to the slot everything now prints from.
   let single: OneSlot | null = null;
   if (project && slots > 1) {
-    const keysOf = (file: string) => new Set(Object.keys(JSON.parse(readFileSync(file, "utf8")) as object));
-    const presetKeys = new Set([...keysOf(machine.file), ...keysOf(flatProcess.file)]);
     const movedXml = collapse?.members["Metadata/model_settings.config"]?.toString("utf8") ?? modelXml;
-    single = oneSlot(project, movedXml, keysOf(filament.file), presetKeys);
+    single = oneSlot(project, movedXml, filamentKeys, presetKeys);
     options.onLine?.(`one extruder: the project's ${single.from} filament slots become one`);
     slots = 1;
   }
 
+  // One extruder, one kind of nozzle: the slicer dies on a project that names two for the 5M.
+  const variants: Variants = project
+    ? extruderVariants(project, new Set([...presetKeys, ...filamentKeys]))
+    : { kinds: [], keys: [] };
+
   // The slicer's command line crashes on a plate that has a name, so the names come out of the copy it reads.
   const plateNames = modelXml ? blankPlateNames(modelXml).names : [];
 
-  // The slicer is handed a copy whenever the project has to change: slots collapsed, plate names and refused keys
-  // taken out.
+  // The slicer is handed a copy whenever the project has to change: slots collapsed, plate names, nozzle kinds and
+  // refused keys taken out.
   const cleanedPath = join(work, `${stem}-cleaned-input.3mf`);
   const writeCleaned = (dropKeys: string[]): string => {
     const changes: Record<string, Buffer | null> = { ...(collapse?.members ?? {}) };
@@ -260,9 +270,10 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
       const current = changes["Metadata/model_settings.config"]?.toString("utf8") ?? modelXml ?? "";
       changes["Metadata/model_settings.config"] = Buffer.from(blankPlateNames(current).xml);
     }
-    if ((dropKeys.length || single) && project) {
+    const drop = [...dropKeys, ...variants.keys];
+    if ((drop.length || single) && project) {
       const settings = { ...(single?.settings ?? project) };
-      for (const key of dropKeys) delete settings[key];
+      for (const key of drop) delete settings[key];
       changes["Metadata/project_settings.config"] = Buffer.from(JSON.stringify(settings, null, 4));
     }
     const zip = new Zip(first);
@@ -276,13 +287,16 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   const collapsed = collapse && (collapse.moved.length || collapse.dropped.length || collapse.kept.length)
     ? { moved: collapse.moved, dropped: collapse.dropped, kept: collapse.kept }
     : undefined;
-  if (single || plateNames.length || (collapse && Object.keys(collapse.members).length)) {
+  if (single || plateNames.length || variants.keys.length || (collapse && Object.keys(collapse.members).length)) {
     sliceInputs = [writeCleaned([])];
     for (const m of collapse?.moved ?? []) options.onLine?.(`one extruder: ${m}`);
     for (const d of collapse?.dropped ?? []) options.onLine?.(`one extruder: the project's ${d} is taken out — add a pause there in Flash Studio if you want the colour change`);
   }
   for (const k of collapse?.kept ?? []) options.onLine?.(`the project's ${k} is kept`);
   for (const n of plateNames) options.onLine?.(`plate name taken out of the copy the slicer reads, its command line crashes on one — ${n}`);
+  if (variants.keys.length) {
+    options.onLine?.(`one kind of nozzle: the project names ${variants.kinds.join(" and ")}, the 5M has one — their lists come out of the copy the slicer reads: ${variants.keys.join(", ")}`);
+  }
 
   const exported = `${stem}-ad5m.3mf`;
   const command = [
@@ -308,6 +322,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     command,
     ...(collapsed ? { collapsed } : {}),
     ...(plateNames.length ? { plateNames } : {}),
+    ...(variants.keys.length ? { variants } : {}),
     ...(notCarried.length ? { notCarried } : {}),
   };
   const finish = (keep: boolean): boolean => {

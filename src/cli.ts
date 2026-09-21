@@ -155,6 +155,10 @@ async function cmdConvert(argv: string[]): Promise<number> {
     console.log("plate names — taken out of the copy the slicer read, its command line crashes on a named plate:");
     for (const n of result.plateNames) console.log(`  ${n}`);
   }
+  if (result.variants?.keys.length) {
+    console.log(`nozzle kinds — the project names ${result.variants.kinds.join(" and ")}, the 5M has one; their lists were taken out of the copy the slicer read:`);
+    console.log(`  ${result.variants.keys.join(", ")}`);
+  }
   if (result.droppedKeys?.length) console.log(warn(`dropped out-of-range keys: ${result.droppedKeys.join(", ")}`));
   for (const n of result.notCarried ?? []) console.log(warn(`not carried from the project: ${n}`));
   if (!result.plates.length) {

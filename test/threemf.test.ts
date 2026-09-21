@@ -10,8 +10,8 @@ import { after, test } from "node:test";
 
 import { withZip } from "../src/zip.js";
 import {
-  blankPlateNames, cleanNote, collapseFilaments, firstSlot, notes, objectSettings, oneSlot, outOfRangeKeys,
-  projectSettings, sliceWarnings, unslicedChanges,
+  blankPlateNames, cleanNote, collapseFilaments, extruderVariants, firstSlot, notes, objectSettings, oneSlot,
+  outOfRangeKeys, type ProjectSettings, projectSettings, sliceWarnings, unslicedChanges,
 } from "../src/threemf.js";
 import { copyZipWith, writeZip } from "../src/zipwrite.js";
 
@@ -133,6 +133,40 @@ test("a project with no named plate is left as it is", () => {
   const plain = blankPlateNames(PLATES).xml;
   assert.deepEqual(blankPlateNames(plain), { xml: plain, names: [] });
   assert.deepEqual(blankPlateNames(MODEL_SETTINGS), { xml: MODEL_SETTINGS, names: [] });
+});
+
+// Bambu Studio 2.04 on a P1S: two kinds of nozzle, and filament lists one entry per slot per kind.
+const TWO_KINDS: ProjectSettings = {
+  filament_settings_id: ["Bambu PLA Basic @BBL P1S 0.4 nozzle", "Bambu PLA Basic @BBL P1S 0.4 nozzle"],
+  printer_extruder_variant: ["Direct Drive Standard", "Direct Drive High Flow"],
+  extruder_variant_list: ["Direct Drive Standard,Direct Drive High Flow"],
+  filament_extruder_variant: ["Direct Drive Standard", "Direct Drive High Flow", "Direct Drive Standard", "Direct Drive High Flow"],
+  filament_self_index: ["1", "1", "2", "2"],
+  print_extruder_id: ["1", "1"],
+  extruder_type: ["Direct Drive"],
+};
+
+test("a project that names two kinds of nozzle has their lists taken out", () => {
+  assert.deepEqual(extruderVariants(TWO_KINDS, new Set()), {
+    kinds: ["Direct Drive Standard", "Direct Drive High Flow"],
+    keys: ["extruder_variant_list", "filament_extruder_variant", "filament_self_index", "print_extruder_id", "printer_extruder_variant"],
+  });
+  // A key a flattened preset carries stays: the slicer replaces it anyway.
+  assert.deepEqual(extruderVariants(TWO_KINDS, new Set(["print_extruder_id"])).keys,
+    ["extruder_variant_list", "filament_extruder_variant", "filament_self_index", "printer_extruder_variant"]);
+});
+
+test("a project that names one kind of nozzle, or none, is left as it is", () => {
+  const oneKind: ProjectSettings = {
+    ...TWO_KINDS,
+    printer_extruder_variant: ["Direct Drive Standard"],
+    extruder_variant_list: ["Direct Drive Standard"],
+    filament_extruder_variant: ["Direct Drive Standard", "Direct Drive Standard"],
+    filament_self_index: ["1", "2"],
+    print_extruder_id: ["1"],
+  };
+  assert.deepEqual(extruderVariants(oneKind, new Set()), { kinds: ["Direct Drive Standard"], keys: [] });
+  assert.deepEqual(extruderVariants({ extruder_type: ["DirectDrive"] }, new Set()), { kinds: [], keys: [] });
 });
 
 test("an object's parts are counted, so a mesh taken out whole can say what it makes one piece", () => {
