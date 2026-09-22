@@ -14,7 +14,7 @@ import { spawn } from "node:child_process";
 
 import { DEFAULT_FILAMENT, WORKDIR } from "./machine.js";
 import { filamentChoices } from "./presets.js";
-import { convert, type ConvertResult } from "./convert.js";
+import { convert, type ConvertResult, type Progress } from "./convert.js";
 import { openInFlashStudio } from "./flashstudio.js";
 import { inspect } from "./inspect.js";
 import { page } from "./page.js";
@@ -23,7 +23,7 @@ import { state } from "./state.js";
 const HOST = "127.0.0.1";
 export const DEFAULT_PORT = 8770;
 
-interface Job { lines: string[]; done: boolean; result?: ConvertResult; error?: string; }
+interface Job { lines: string[]; done: boolean; progress?: Progress; result?: ConvertResult; error?: string; }
 const jobs = new Map<string, Job>();
 
 /** Only paths under the work folder, whatever a request asks for. */
@@ -109,6 +109,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       fromMesh: body["fromMesh"] === "1",
       overrides,
       onLine: (line) => job.lines.push(line),
+      onProgress: (progress) => { job.progress = progress; },
     })
       .then((result) => {
         job.result = result;

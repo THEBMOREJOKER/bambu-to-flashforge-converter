@@ -123,6 +123,8 @@ bin/b2f-app                               # starts it if needed and opens the br
 ```
 
 In the app: pick or drop a model and read its notes. Choose layer height, filament, brim and infill, then convert.
+A progress bar follows Flash Studio's own report, step by step (the slicer writes each step to a named pipe when
+started with `--pipe`); the command line prints the same steps as lines.
 Read the check and the drawing of the first layer, and press **open in Flash Studio**. If Flash Studio's command
 line crashes on the project, the page offers **retry from the mesh alone**.
 

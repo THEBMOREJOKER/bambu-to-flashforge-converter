@@ -11,9 +11,11 @@
  * that come from you are the ones passed as `--set`, and those are refused for anything the machine owns.
  */
 import {
-  closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync,
+  closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync,
+  writeSync,
 } from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -51,7 +53,25 @@ export interface ConvertOptions {
   dryRun?: boolean;
   /** Every line the slicer prints, as it prints it — the GUI shows these live. */
   onLine?: (line: string) => void;
+  /** Where the job is, for a progress bar: every stage, and every step the slicer reports. */
+  onProgress?: (progress: Progress) => void;
 }
+
+/** Where a conversion is: the whole job as one percentage, and what is happening now. */
+export interface Progress {
+  /** prepare → slice → check → save → done; retry when Flash Studio refused the project's values and slices again. */
+  stage: "prepare" | "slice" | "retry" | "check" | "save" | "done";
+  /** 0–100 over the whole job. The slicer's own report fills 3–93. */
+  percent: number;
+  /** What is happening now — while it slices, in the slicer's own words. */
+  text: string;
+  /** The plate being sliced, and how many there are, while the slicer says. */
+  plate?: number;
+  plates?: number;
+}
+
+/** One step the slicer reports on its progress pipe (`--pipe`): a JSON object per line. */
+export interface SlicerReport { message: string; percent: number; plate: number; plates: number; }
 
 export interface ConvertResult {
   /** The folder the finished project goes to. */
@@ -97,13 +117,72 @@ const HEADLESS_NOISE = /FF_CRASH_TRACE|glfwInit|glew library|init opengl failed|
 
 interface CliRun { exit: number | null; signal: NodeJS.Signals | null; result: Record<string, unknown>; }
 
-export async function runCli(command: string[], out: string, onLine?: (line: string) => void): Promise<CliRun> {
+/**
+ * The slicer reports each step on a named pipe when asked (`--pipe`): "Generating walls" at 16 %, "Generating G-code"
+ * at 75 %, "All done, Success" at 100 %. The pipe is opened read-write, so the open never waits for the slicer and a
+ * slicer that dies before it writes leaves nothing hanging. Without mkfifo the slice runs as before, with no percentage.
+ */
+function progressPipe(dir: string, onReport: (report: SlicerReport) => void): { path: string; close: () => Promise<void> } | null {
+  const path = join(dir, "progress.fifo");
+  try {
+    rmSync(path, { force: true });
+    execFileSync("mkfifo", [path]);
+  } catch {
+    return null;
+  }
+  const END = "-- end of reports --";
+  const pipe = new Socket({ fd: openSync(path, constants.O_RDWR | constants.O_NONBLOCK) });
+  let drained = (): void => undefined;
+  let carry = "";
+  pipe.on("data", (chunk: Buffer) => {
+    const lines = (carry + chunk.toString("utf8")).split("\n");
+    carry = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line === END) {
+        drained();
+        continue;
+      }
+      try {
+        const r = JSON.parse(line) as Record<string, unknown>;
+        onReport({
+          message: String(r["message"] ?? ""), percent: Number(r["total_percent"] ?? 0),
+          plate: Number(r["plate_index"] ?? 0), plates: Number(r["plate_count"] ?? 0),
+        });
+      } catch {
+        // a torn or foreign line: the next report carries the state
+      }
+    }
+  });
+  // Progress is a courtesy; a pipe that fails never stops the slice.
+  pipe.on("error", () => drained());
+  // Once the slicer is gone, a line of our own goes into the pipe behind everything it wrote: when that line comes
+  // back out, every report has been read — the last one too.
+  const close = (): Promise<void> => new Promise((resolve) => {
+    const timer = setTimeout(() => drained(), 2000);
+    drained = () => {
+      drained = () => undefined;
+      clearTimeout(timer);
+      pipe.destroy();
+      rmSync(path, { force: true });
+      resolve();
+    };
+    pipe.write(`\n${END}\n`);
+  });
+  return { path, close };
+}
+
+export async function runCli(
+  command: string[], out: string, onLine?: (line: string) => void, onReport?: (report: SlicerReport) => void,
+): Promise<CliRun> {
   const logPath = join(out, "cli.log");
   // A run that crashes writes no result.json; the retry must not read the first run's refusal as its own.
   rmSync(join(out, "result.json"), { force: true });
   const log = openSync(logPath, "w");
   const [bin, ...args] = command;
-  const child = spawn(bin ?? "", args, { env: { ...process.env, SSL_CERT_FILE: SSL_CERT } });
+  const reports = onReport ? progressPipe(out, onReport) : null;
+  const child = spawn(bin ?? "", reports ? ["--pipe", reports.path, ...args] : args, {
+    env: { ...process.env, SSL_CERT_FILE: SSL_CERT },
+  });
 
   let carry = "";
   const consume = (chunk: Buffer) => {
@@ -125,6 +204,7 @@ export async function runCli(command: string[], out: string, onLine?: (line: str
     child.on("close", (code, sig) => resolve({ exit: code, signal: sig }));
   });
   closeSync(log);
+  await reports?.close();
 
   let result: Record<string, unknown> = {};
   try {
@@ -170,6 +250,12 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   }
   const isProject = low.endsWith(".3mf");
   const fromMesh = Boolean(options.fromMesh) && isProject;
+  let last = 0;
+  const progress = (stage: Progress["stage"], percent: number, text: string, extra: Partial<Progress> = {}): void => {
+    last = Math.max(0, Math.min(100, Math.round(percent)));
+    options.onProgress?.({ stage, percent: last, text, ...extra });
+  };
+  progress("prepare", 0, isProject ? "reading the project" : "reading the model");
 
   const processKey = options.process ?? "0.20";
   const processPath = join(PROFILES, "process", PROCESS[processKey] ?? "");
@@ -227,6 +313,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     ...merged.map((o) => `${o.name || `object ${o.objectId}`}: its ${o.parts} parts become one piece`),
   ];
   if (fromMesh) {
+    progress("prepare", 1, "taking the mesh out of the project whole");
     options.onLine?.("taking the mesh out of the project whole — the slicer crashed on the project file, not on its geometry");
     for (const n of notCarried) options.onLine?.(`not carried: ${n}`);
     options.onLine?.("not carried either: modifiers, painted supports and the designer's layer changes, if the project had any");
@@ -337,7 +424,11 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     };
   }
 
-  let run = await runCli(command, work, options.onLine);
+  // The slicer's own report fills 3–93 of the bar; the check and the save take the rest.
+  const report = (r: SlicerReport): void =>
+    progress("slice", 3 + r.percent * 0.9, r.message, r.plate > 0 ? { plate: r.plate, plates: r.plates } : {});
+  progress("prepare", 3, "handing it to Flash Studio's slicer");
+  let run = await runCli(command, work, options.onLine, report);
   let droppedKeys: string[] | undefined;
 
   // A newer Bambu Studio writes values this Orca refuses outright. Take exactly those keys out of a copy and retry.
@@ -350,8 +441,9 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     if (droppedKeys.length) {
       const cleaned = writeCleaned(droppedKeys);
       options.onLine?.(`the project carries values Flash Studio refuses: ${droppedKeys.join(", ")} — dropped from a cleaned copy, re-running once`);
+      progress("retry", 3, `Flash Studio refused ${droppedKeys.length} of the project's values — dropped them, slicing again`);
       command.splice(command.length - 1, 1, cleaned);   // a .3mf goes alone
-      run = await runCli(command, work, options.onLine);
+      run = await runCli(command, work, options.onLine, report);
     }
   }
 
@@ -364,6 +456,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     const advice = retry
       ? "Flash Studio's CLI crashes on this project file, not on its geometry — convert the mesh taken out whole instead"
       : `the slicer wrote no plate: ${errorString}`;
+    progress("done", last, segfault ? "the slicer crashed" : "the slicer wrote no plate");
     return {
       ...base, delivered: false, workKept: finish(true), plates: [], checks: [], maps: [], slicerWarnings: [],
       cliExit: run.exit, cliSignal: run.signal, errorString,
@@ -371,6 +464,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     };
   }
 
+  progress("check", 94, plates.length > 1 ? `checking ${plates.length} plates against the 5M` : "checking the plate against the 5M");
   const checks = plates.map((p) => check(join(work, p)));
   const maps = plates.map((p) => plateMap(join(work, p)));
   const worst = checks.some((c) => c.code === 2) ? 2 : 0;
@@ -384,6 +478,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     try {
       slicerWarnings = sliceWarnings(zip);
       if (worst === 0) {
+        progress("save", 97, "writing the project for Flash Studio");
         mkdirSync(out, { recursive: true });
         const part = `${project3mf}.part`;
         copyZipWith(zip, part, unslicedChanges(zip));
@@ -395,6 +490,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     }
   }
   for (const w of slicerWarnings) options.onLine?.(`Flash Studio warns: ${w}`);
+  progress("done", delivered ? 100 : last, delivered ? "saved for Flash Studio" : worst === 2 ? "a plate failed the check" : "no project was written");
 
   const advice = worst === 2
     ? `a plate failed the check — nothing was written to ${out}; the slice is in ${work}`

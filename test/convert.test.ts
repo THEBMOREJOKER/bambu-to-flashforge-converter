@@ -7,7 +7,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { convert, runCli } from "../src/convert.js";
+import { convert, runCli, type SlicerReport } from "../src/convert.js";
 import { APPIMAGE, MACHINE_JSON } from "../src/machine.js";
 import { withZip } from "../src/zip.js";
 import { writeZip } from "../src/zipwrite.js";
@@ -113,3 +113,32 @@ test("a project naming two kinds of nozzle is handed to the slicer without their
       if (work) rmSync(work, { recursive: true, force: true });
     }
   });
+
+// The slicer reports each step on a named pipe (--pipe). A report torn across two writes, a line that is not JSON and
+// the last report before the slicer exits must all come through, and the pipe must be gone afterwards.
+test("the slicer's progress pipe is read step by step, the last report too", { skip: process.platform === "win32" }, async () => {
+  const out = mkdtempSync(join(tmpdir(), "b2f-test-"));
+  try {
+    const fake = join(out, "fake-slicer.sh");
+    writeFileSync(fake, [
+      "#!/bin/sh",
+      "# $1 is --pipe and $2 its path, as the slicer is called",
+      "printf '%s\\n' '{\"message\":\"Slicing mesh\",\"plate_count\":1,\"plate_index\":1,\"total_percent\":7}' > \"$2\"",
+      "printf '%s\\n' 'not a report' > \"$2\"",
+      "printf '%s' '{\"message\":\"Generating walls\",\"plate_count\":1,' > \"$2\"",
+      "printf '%s\\n' '\"plate_index\":1,\"total_percent\":16}' > \"$2\"",
+      "printf '%s\\n' '{\"message\":\"All done, Success\",\"plate_count\":1,\"plate_index\":0,\"total_percent\":100}' > \"$2\"",
+    ].join("\n") + "\n", { mode: 0o755 });
+    const reports: SlicerReport[] = [];
+    const run = await runCli([fake], out, undefined, (r) => reports.push(r));
+    assert.equal(run.exit, 0);
+    assert.deepEqual(reports, [
+      { message: "Slicing mesh", percent: 7, plate: 1, plates: 1 },
+      { message: "Generating walls", percent: 16, plate: 1, plates: 1 },
+      { message: "All done, Success", percent: 100, plate: 0, plates: 1 },
+    ]);
+    assert.equal(existsSync(join(out, "progress.fifo")), false);
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+});

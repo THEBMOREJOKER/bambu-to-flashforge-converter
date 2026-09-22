@@ -115,6 +115,7 @@ async function cmdConvert(argv: string[]): Promise<number> {
   const { positional, flags } = parse(argv);
   const processKey = String(flags.get("process") ?? "0.20");
   if (!(processKey in PROCESS)) { console.log(`--process must be one of ${Object.keys(PROCESS).join(", ")}`); return 1; }
+  let lastStep = "";
   const result = await convert({
     inputs: positional,
     process: processKey as keyof typeof PROCESS,
@@ -129,6 +130,12 @@ async function cmdConvert(argv: string[]): Promise<number> {
     overrides: all(argv, "set"),
     dryRun: flags.has("dry-run"),
     onLine: (line) => process.stdout.write(`  ${line}\n`),
+    // Each step once, as the slicer names it: the command line's progress bar is a column of them.
+    onProgress: (p) => {
+      if (p.text === lastStep) return;
+      lastStep = p.text;
+      process.stdout.write(`  ${String(p.percent).padStart(3)} %  ${p.text}\n`);
+    },
   });
 
   console.log("presets, each flattened through its inherits chain:");
