@@ -14,6 +14,10 @@ export interface StlInfo {
 
 const RECORD = 50; // 12 floats of normal and vertices, plus a 2-byte attribute count
 
+
+/** The longest "solid" line handed to the slicer. Its buffer is 256 bytes; this leaves room and is far past any name. */
+const ASCII_NAME_MAX = 200;
+
 export function stlInfo(path: string): StlInfo {
   const fd = openSync(path, "r");
   try {
@@ -21,6 +25,20 @@ export function stlInfo(path: string): StlInfo {
     const head = Buffer.alloc(Math.min(1024, fileSize));
     readSync(fd, head, 0, head.length, 0);
     const looksAscii = head.subarray(0, 5).toString("ascii") === "solid" && head.includes(Buffer.from("facet"));
+
+    // Flash Studio's own reader takes the rest of the "solid" line into a 256-byte buffer with no width limit, and
+    // the three words after an "MW" marker into buffers of 16, 128 and 16, the same way. Both are in 1.7.9 and in
+    // 1.7.15. A file whose first line is longer than the buffer overruns it, so it is refused here rather than
+    // handed over. A real name is a few dozen characters; 200 is already generous.
+    if (looksAscii) {
+      const firstLine = head.subarray(0, head.indexOf(0x0a) === -1 ? head.length : head.indexOf(0x0a));
+      if (firstLine.length > ASCII_NAME_MAX) {
+        throw new Error(
+          `${path}: the "solid" line is ${firstLine.length} bytes; the slicer reads it into a 256-byte buffer and `
+          + `would overrun it. Re-export the model, or shorten the name on its first line.`,
+        );
+      }
+    }
 
     const min: [number, number, number] = [Infinity, Infinity, Infinity];
     const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
