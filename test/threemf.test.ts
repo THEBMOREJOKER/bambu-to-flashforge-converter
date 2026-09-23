@@ -12,6 +12,7 @@ import { withZip } from "../src/zip.js";
 import {
   blankPlateNames, cleanNote, collapseFilaments, extruderVariants, firstSlot, notes, objectSettings, oneSlot,
   outOfRangeKeys, type ProjectSettings, projectSettings, sliceWarnings, unslicedChanges,
+  stripBreaks,
 } from "../src/threemf.js";
 import { copyZipWith, writeZip } from "../src/zipwrite.js";
 
@@ -351,4 +352,36 @@ test("the values a newer Bambu Studio writes and Orca 2.3.2 refuses are named", 
     wall_filament: "0", sparse_infill_filament: ["0"], support_filament: "1",
     raft_first_layer_expansion: "-1", tree_support_wall_count: ["-1"], wall_loops: "-1",
   }), ["raft_first_layer_expansion", "sparse_infill_filament", "tree_support_wall_count", "wall_filament"]);
+});
+
+test("stripBreaks takes a line break out of a filament colour and says so", () => {
+  const { settings, found } = stripBreaks({
+    filament_colour: ["#FFFFFF\nSET_GCODE_OFFSET Z=-2.0", "#00FF00"],
+    filament_type: ["PLA"],
+  } as never);
+  assert.deepEqual((settings as never as Record<string, string[]>)["filament_colour"],
+    ["#FFFFFFSET_GCODE_OFFSET Z=-2.0", "#00FF00"]);
+  assert.equal(found.length, 1);
+  assert.equal(found[0]?.key, "filament_colour");
+  assert.equal(found[0]?.slot, 1);
+});
+
+test("stripBreaks leaves a sound project alone, custom G-code included", () => {
+  const settings = {
+    filament_colour: ["#FFFFFF"],
+    filament_type: ["PLA"],
+    machine_start_gcode: "G90\nM83\nG28",
+  } as never;
+  const { settings: out, found } = stripBreaks(settings);
+  assert.equal(found.length, 0);
+  assert.deepEqual(out, settings);
+});
+
+test("stripBreaks catches a carriage return in a filament type and in an id", () => {
+  const { found } = stripBreaks({
+    filament_type: ["PLA\r\nM104 S300"],
+    filament_settings_id: ["Generic PLA\nG92 Z10"],
+  } as never);
+  assert.equal(found.length, 2);
+  assert.deepEqual(found.map((f) => f.key).sort(), ["filament_settings_id", "filament_type"]);
 });

@@ -28,6 +28,7 @@ import {
   blankPlateNames, type Collapse, collapseFilaments, extruderVariants, type Notes, notes, type ObjectSetting,
   objectSettings, outOfRangeKeys, modelSettings, oneSlot, type OneSlot, projectSettings, sliceWarnings,
   unslicedChanges, type Variants,
+  type Broken, stripBreaks,
 } from "./threemf.js";
 import { copyZipWith } from "./zipwrite.js";
 import { Zip } from "./zip.js";
@@ -281,6 +282,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   let projectNotes: Notes = {};
   let replaced: Replaced[] = [];
   let project: Record<string, string | string[]> | null = null;
+  let broken: Broken[] = [];
   let collapse: Collapse | null = null;
   let modelXml: string | null = null;
   let carried: ObjectSetting[] = [];
@@ -295,6 +297,11 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
         merged = objects.filter((o) => o.parts > 1);
       } else {
         project = projectSettings(zip);
+        if (project) {
+          const stripped = stripBreaks(project);
+          broken = stripped.found;
+          if (broken.length) project = stripped.settings;
+        }
         collapse = collapseFilaments(zip);
         modelXml = modelSettings(zip);
         const ids = project?.["filament_settings_id"];
@@ -358,7 +365,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
       changes["Metadata/model_settings.config"] = Buffer.from(blankPlateNames(current).xml);
     }
     const drop = [...dropKeys, ...variants.keys];
-    if ((drop.length || single) && project) {
+    if ((drop.length || single || broken.length) && project) {
       const settings = { ...(single?.settings ?? project) };
       for (const key of drop) delete settings[key];
       changes["Metadata/project_settings.config"] = Buffer.from(JSON.stringify(settings, null, 4));
@@ -374,12 +381,15 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   const collapsed = collapse && (collapse.moved.length || collapse.dropped.length || collapse.kept.length)
     ? { moved: collapse.moved, dropped: collapse.dropped, kept: collapse.kept }
     : undefined;
-  if (single || plateNames.length || variants.keys.length || (collapse && Object.keys(collapse.members).length)) {
+  if (single || broken.length || plateNames.length || variants.keys.length || (collapse && Object.keys(collapse.members).length)) {
     sliceInputs = [writeCleaned([])];
     for (const m of collapse?.moved ?? []) options.onLine?.(`one extruder: ${m}`);
     for (const d of collapse?.dropped ?? []) options.onLine?.(`one extruder: the project's ${d} is taken out — add a pause there in Flash Studio if you want the colour change`);
   }
   for (const k of collapse?.kept ?? []) options.onLine?.(`the project's ${k} is kept`);
+  for (const b of broken) {
+    options.onLine?.(`line break taken out of ${b.key}${b.slot ? ` slot ${b.slot}` : ""} in the copy the slicer reads — it would have become a command above the start block: ${b.text}`);
+  }
   for (const n of plateNames) options.onLine?.(`plate name taken out of the copy the slicer reads, its command line crashes on one — ${n}`);
   if (variants.keys.length) {
     options.onLine?.(`one kind of nozzle: the project names ${variants.kinds.join(" and ")}, the 5M has one — their lists come out of the copy the slicer reads: ${variants.keys.join(", ")}`);

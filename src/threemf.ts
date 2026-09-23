@@ -214,6 +214,44 @@ const SLOT_SHAPED: Record<string, (n: number) => number> = {
   inherits_group: (n) => n + 2,
 };
 
+/**
+ * Keys a project carries that the slicer copies into the G-code it writes, as the text of the file's own metadata.
+ * Flash Studio escapes those values for XML but not for the end of a line, and it moves that metadata above the start
+ * block, so a line break inside one of them becomes a command that runs before the first heat and the first home
+ * (read in the 1.7.15 source, 2026-09-23). Homing undoes a shifted origin; SET_GCODE_OFFSET it does not.
+ */
+const HEADER_KEYS = new Set([
+  "filament_colour", "filament_color", "filament_type", "filament_ids", "filament_settings_id", "filament_vendor",
+  "print_settings_id", "printer_settings_id", "printer_model", "printer_variant",
+]);
+
+export interface Broken { key: string; slot: number | null; text: string; }
+
+/**
+ * Takes the line breaks and other control characters out of those values, in the copy the slicer reads. What is left
+ * is the value a person meant — a colour, a name — and what is gone could not have been printed anyway. Everything
+ * removed is reported: this is a defect in the file, not a detail to swallow.
+ */
+export function stripBreaks(settings: ProjectSettings): { settings: ProjectSettings; found: Broken[] } {
+  const found: Broken[] = [];
+  const out: ProjectSettings = {};
+  const clean = (value: string, key: string, slot: number | null): string => {
+    // eslint-disable-next-line no-control-regex
+    if (!/[\u0000-\u001f\u007f]/.test(value)) return value;
+    found.push({ key, slot, text: value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 60) });
+    // eslint-disable-next-line no-control-regex
+    return value.replace(/[\u0000-\u001f\u007f]+/g, "").trim();
+  };
+  for (const [key, value] of Object.entries(settings)) {
+    if (!HEADER_KEYS.has(key)) { out[key] = value; continue; }
+    if (typeof value === "string") out[key] = clean(value, key, null);
+    else if (Array.isArray(value)) {
+      out[key] = value.map((v, i) => (typeof v === "string" ? clean(v, key, i + 1) : v));
+    } else out[key] = value;
+  }
+  return { settings: out, found };
+}
+
 export interface OneSlot { settings: ProjectSettings; modelXml: string | null; from: number; }
 
 /**

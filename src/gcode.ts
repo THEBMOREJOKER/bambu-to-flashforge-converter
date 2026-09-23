@@ -15,6 +15,14 @@ import {
 
 const PARAM = /([A-Za-z])\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)/g;
 
+/**
+ * Commands that change what the printer believes about itself rather than moving it: the Z offset, the position it
+ * thinks it is at, its saved configuration. The AD5M's own start block uses SET_PRESSURE_ADVANCE and
+ * SET_VELOCITY_LIMIT, which only set print parameters, so those are not here. Checked against a sliced file: a clean
+ * AD5M G-code carries none of these, and its one G92 is G92 E0.
+ */
+const STATE_COMMANDS = /^\s*(SET_GCODE_OFFSET|SET_KINEMATIC_POSITION|SET_HOME_OFFSET|SAVE_CONFIG|FIRMWARE_RESTART|RESTART|M500|M502)\b/i;
+
 /** The '; key = value' block a slicer writes, plus its totals lines. Stops at the end of the config block. */
 export function header(path: string): Map<string, string> {
   const h = new Map<string, string>();
@@ -67,6 +75,12 @@ export interface Scan {
   layers: number;
   /** Every T command, in order. The 5M has one extruder: anything but T0 is a change it cannot make. */
   tools: Array<{ line: number; tool: number }>;
+  /** The line "; EXECUTABLE_BLOCK_START" sits on, when the file has one. */
+  executableStart: number | null;
+  /** Commands before that marker. In a file the slicer wrote there are none: the first is the line after it. */
+  beforeStart: Array<{ line: number; text: string }>;
+  /** Commands that move the printer's own idea of where it is, or rewrite its configuration. */
+  stateCommands: Array<{ line: number; text: string }>;
 }
 
 /** Every point an arc can reach: its end, plus each axis extreme the sweep passes through. */
@@ -110,6 +124,8 @@ export function scan(path: string): Scan {
     bambuHits: [], maxZ: null, x: [null, null], y: [null, null],
     hasNozzleHeat: false, hasBedHeat: false, arcs: 0, relativeMoves: 0,
     maxFeedXY: 0, maxFeedZOnly: 0, maxAccel: 0, maxNozzleC: 0, maxBedC: 0, layers: 0, tools: [],
+  
+    executableStart: null, beforeStart: [], stateCommands: [],
   };
   let minX: number | null = null, maxX: number | null = null, minY: number | null = null, maxY: number | null = null;
   const see = (x: number, y: number) => {
@@ -127,8 +143,11 @@ export function scan(path: string): Scan {
     lineNo++;
     if (raw.startsWith(";")) {
       if (raw.startsWith(";LAYER_CHANGE")) s.layers++;
+      if (s.executableStart === null && raw.includes("EXECUTABLE_BLOCK_START")) s.executableStart = lineNo;
       continue;
     }
+    if (s.executableStart === null && raw.trim()) s.beforeStart.push({ line: lineNo, text: raw.trim().slice(0, 60) });
+    if (STATE_COMMANDS.test(raw)) s.stateCommands.push({ line: lineNo, text: raw.trim().slice(0, 60) });
     if (raw.startsWith("M104") || raw.startsWith("M109")) s.hasNozzleHeat = true;
     if (raw.startsWith("M140") || raw.startsWith("M190")) s.hasBedHeat = true;
     for (const marker of BAMBU_MARKERS) {
@@ -168,6 +187,8 @@ export function scan(path: string): Scan {
 
     const p = params(code.slice(word.length));
     if (word === "G92") {
+      // G92 E0 resets the extruder and is ordinary. G92 on X, Y or Z moves the machine's own idea of where it is.
+      if (p.has("X") || p.has("Y") || p.has("Z")) s.stateCommands.push({ line: lineNo, text: code.slice(0, 60) });
       if (p.has("X")) px = p.get("X") ?? px;
       if (p.has("Y")) py = p.get("Y") ?? py;
       if (p.has("Z")) pz = p.get("Z") ?? pz;
@@ -270,6 +291,21 @@ export function check(path: string): CheckResult {
   verdict(!changes.length && usedSlots.length <= 1,
     `one extruder: ${s.tools.length ? "T0 only" : "no tool command"}`,
     `the 5M has one extruder and this file ${[changeText, slotText].filter(Boolean).join(" and ")} — re-convert it onto one slot`);
+
+  // A project can put its own text where the slicer writes the file's metadata, and that text lands above the start
+  // block, before the first heat and the first home. In a file the slicer wrote, nothing executes there.
+  if (s.executableStart !== null) {
+    const first = s.beforeStart[0];
+    verdict(!s.beforeStart.length,
+      `nothing executes before the start block (line ${s.executableStart})`,
+      `${s.beforeStart.length} command(s) run before the start block at line ${s.executableStart} — first at line ${first?.line ?? 0}: ${first?.text ?? ""}`);
+  }
+
+  // Homing undoes a shifted origin; these are the commands it does not undo.
+  const state = s.stateCommands[0];
+  verdict(!s.stateCommands.length,
+    "no command rewrites the printer's origin or its saved configuration",
+    `${s.stateCommands.length} command(s) change the printer's own state — first at line ${state?.line ?? 0}: ${state?.text ?? ""}`);
 
   verdict(s.maxZ !== null && s.maxZ <= BED_Z, `max Z ${s.maxZ} mm`, `max Z ${s.maxZ} exceeds ${BED_Z} mm`);
 
