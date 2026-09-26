@@ -23,6 +23,7 @@ import { APPIMAGE, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SS
 import { applyOverrides, findPreset, type Replaced, selectableFor5M, settingsDiff, writeFlatPreset } from "./presets.js";
 import { check, type CheckResult } from "./gcode.js";
 import { plateMap, type PlateMap } from "./platemap.js";
+import { type HeldObject, separation, type SeparatedObject } from "./separate.js";
 import { split } from "./split.js";
 import {
   blankPlateNames, type Collapse, collapseFilaments, extruderVariants, type Notes, notes, type ObjectSetting,
@@ -49,6 +50,8 @@ export interface ConvertOptions {
   keep?: boolean;
   /** Slice the project's mesh, taken out whole, instead of the project file — the way round a slicer crash. */
   fromMesh?: boolean;
+  /** Leave an object that is really several parts merged into one. Off by default: the parts are put back on their own feet. */
+  keepMerged?: boolean;
   /** KEY=VALUE decisions about the part, on top of the process preset. */
   overrides?: string[];
   dryRun?: boolean;
@@ -107,6 +110,8 @@ export interface ConvertResult {
   variants?: Variants;
   /** What did not travel when the mesh was taken out whole: an object's own settings, and its separate parts. */
   notCarried?: string[];
+  /** Objects that were several parts merged into one, taken apart in the copy the slicer read — and any left as they are. */
+  separated?: { objects: SeparatedObject[]; held: HeldObject[] };
   /** What to do next when this did not work. */
   advice?: string;
   /** The slicer crashed on the project file: the mesh taken out whole is the way through. */
@@ -287,6 +292,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   let modelXml: string | null = null;
   let carried: ObjectSetting[] = [];
   let merged: ObjectSetting[] = [];
+  let apart: Awaited<ReturnType<typeof separation>> = null;
   if (isProject) {
     const zip = new Zip(first);
     try {
@@ -306,6 +312,10 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
         modelXml = modelSettings(zip);
         const ids = project?.["filament_settings_id"];
         if (Array.isArray(ids) && ids.length) slots = ids.length;
+        if (!options.keepMerged) {
+          progress("prepare", 1, "reading the model to see what each object is really made of");
+          apart = await separation(zip);
+        }
       }
     } finally {
       zip.close();
@@ -372,6 +382,10 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     }
     const zip = new Zip(first);
     try {
+      if (apart?.objects.length) {
+        const current = changes["Metadata/model_settings.config"]?.toString("utf8") ?? modelXml;
+        Object.assign(changes, apart.members(zip, current));
+      }
       copyZipWith(zip, cleanedPath, changes);
     } finally {
       zip.close();
@@ -381,7 +395,8 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   const collapsed = collapse && (collapse.moved.length || collapse.dropped.length || collapse.kept.length)
     ? { moved: collapse.moved, dropped: collapse.dropped, kept: collapse.kept }
     : undefined;
-  if (single || broken.length || plateNames.length || variants.keys.length || (collapse && Object.keys(collapse.members).length)) {
+  if (single || broken.length || plateNames.length || variants.keys.length || apart?.objects.length
+    || (collapse && Object.keys(collapse.members).length)) {
     sliceInputs = [writeCleaned([])];
     for (const m of collapse?.moved ?? []) options.onLine?.(`one extruder: ${m}`);
     for (const d of collapse?.dropped ?? []) options.onLine?.(`one extruder: the project's ${d} is taken out — add a pause there in Flash Studio if you want the colour change`);
@@ -393,6 +408,13 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   for (const n of plateNames) options.onLine?.(`plate name taken out of the copy the slicer reads, its command line crashes on one — ${n}`);
   if (variants.keys.length) {
     options.onLine?.(`one kind of nozzle: the project names ${variants.kinds.join(" and ")}, the 5M has one — their lists come out of the copy the slicer reads: ${variants.keys.join(", ")}`);
+  }
+  for (const o of apart?.objects ?? []) {
+    const sizes = o.sizes.map((s) => s.map((v) => v.toFixed(1)).join(" × ")).join(", ");
+    options.onLine?.(`'${o.name}' is ${o.pieces} parts merged into one object — each is its own object now, where it sat: ${sizes} mm`);
+  }
+  for (const h of apart?.held ?? []) {
+    options.onLine?.(`'${h.name}' is ${h.pieces} parts merged into one object and is left that way — ${h.why}`);
   }
 
   const exported = `${stem}-ad5m.3mf`;
@@ -421,6 +443,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     ...(plateNames.length ? { plateNames } : {}),
     ...(variants.keys.length ? { variants } : {}),
     ...(notCarried.length ? { notCarried } : {}),
+    ...(apart ? { separated: { objects: apart.objects, held: apart.held } } : {}),
   };
   const finish = (keep: boolean): boolean => {
     if (keep) return true;

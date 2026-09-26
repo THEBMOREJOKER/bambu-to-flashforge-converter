@@ -30,6 +30,13 @@ b2f convert ~/3dprint/in/model.3mf    →    ~/3dprint/out/model-ad5m.3mf    →
   High Flow, and keeps its filament lists per slot per kind. Flash Studio's command line crashes on those lists for
   the 5M's one nozzle, so when a project names more than one kind, the lists come out of the copy the slicer reads and
   are printed. The slicer fills in its own one-kind values.
+- **Takes parts merged into one object apart.** A project exported with two parts welded into a single object —
+  Bambu Studio calls it a combined body, 组合体 — is one piece to any slicer: it cannot be moved, oriented or set
+  apart. Each piece becomes an object of its own in the copy the slicer reads, exactly where it sat, and the sizes
+  are printed. A figure printed in place is never taken apart: its pieces are nested or laid across each other,
+  their boxes meet, and the rule is the geometry rather than the count of shells. An object is also left alone, and
+  said, when its faces carry paint, when it holds a modifier or a support blocker, or when it is built from several
+  volumes of its own. `--keep-merged` turns it off.
 - **Keeps the model:** objects, their separate parts, transforms, modifiers and per-object settings ride along. Parts are re-arranged
   onto the 5M's centred bed.
 - **Prints the designer's notes.** A project often says "0.2 mm, no supports, figure at 0% infill" in its
@@ -100,7 +107,8 @@ Options for `convert`:
 | `--scale F` | uniform scale, only when you ask for it. `inspect` reports a part larger than the 220 mm bed, and the check fails a plate that leaves it |
 | `--plate N` | one plate (default: all) |
 | `--name STEM`, `--out DIR` | output name and folder |
-| `--from-mesh` | slice the project's mesh taken out whole, for a project file Flash Studio's command line crashes on. An object made of several parts comes out as one piece; per-object settings, modifiers, painted supports and layer changes do not travel, and the tool names what was lost |
+| `--from-mesh` | slice the project's mesh taken out whole, for a project file Flash Studio's command line crashes on. One STL per piece: parts that sit clear of each other stay separate objects, nested parts stay in one STL. Per-object settings, modifiers, painted supports and layer changes do not travel, and the tool names what was lost |
+| `--keep-merged` | leave an object that is really several parts welded into one. Off by default: the pieces are put back on their own feet |
 | `--keep` | keep the temporary folder |
 
 Other commands:

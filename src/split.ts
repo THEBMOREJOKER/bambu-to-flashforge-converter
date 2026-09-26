@@ -51,14 +51,21 @@ export interface Mesh {
   tris: Uint32Array;
 }
 
+/** A face with nothing on it but its three corners. Anything more is paint: a colour, a support, a seam. */
+const PLAIN_FACE = /^\s*v1="\d+"\s+v2="\d+"\s+v3="\d+"\s*\/?\s*$/;
+
 const num = (attrs: string, name: string) => Number(new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(attrs)?.[1]);
 
-/** Every build item's mesh, vertices transformed the way the project places them. */
-export async function itemMeshes(zip: Zip): Promise<Array<{ objectId: string; mesh: Mesh }>> {
+/**
+ * Every build item's mesh, vertices transformed the way the project places them — and whether its faces carry
+ * anything painted on them, because paint rides on the face and does not survive a mesh being rewritten.
+ */
+export async function itemMeshes(zip: Zip): Promise<Array<{ objectId: string; mesh: Mesh; painted: boolean }>> {
   const { items, objects } = await structure(zip);
   const places = placements(items, objects);
   const verts = items.map(() => new Floats());
   const tris = items.map(() => new Ints());
+  const painted = items.map(() => false);
 
   const modelFiles = [...new Set([...places.keys()].map((k) => k.split("#")[0] ?? ""))];
   for (const path of modelFiles) {
@@ -95,6 +102,7 @@ export async function itemMeshes(zip: Zip): Promise<Array<{ objectId: string; me
         if (m[1] === "vertex") {
           local.push(num(attrs, "x"), num(attrs, "y"), num(attrs, "z"));
         } else {
+          if (!PLAIN_FACE.test(attrs)) for (const { item } of active) painted[item] = true;
           faces.push(num(attrs, "v1"));
           faces.push(num(attrs, "v2"));
           faces.push(num(attrs, "v3"));
@@ -110,6 +118,7 @@ export async function itemMeshes(zip: Zip): Promise<Array<{ objectId: string; me
       verts: verts[i]!.data.subarray(0, verts[i]!.length),
       tris: tris[i]!.data.subarray(0, tris[i]!.length),
     },
+    painted: painted[i] ?? false,
   }));
 }
 
@@ -143,9 +152,12 @@ export function shells(mesh: Mesh): number[][] {
   return [...groups.values()].sort((a, b) => b.length - a.length);
 }
 
-export function size(mesh: Mesh, idx: Iterable<number>): [number, number, number] {
-  const lo = [Infinity, Infinity, Infinity];
-  const hi = [-Infinity, -Infinity, -Infinity];
+/** Where a set of faces sits on the plate. */
+export interface Box { lo: [number, number, number]; hi: [number, number, number]; }
+
+export function box(mesh: Mesh, idx: Iterable<number>): Box {
+  const lo: [number, number, number] = [Infinity, Infinity, Infinity];
+  const hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
   for (const i of idx) {
     for (let c = 0; c < 3; c++) {
       const v = mesh.tris[3 * i + c]!;
@@ -156,7 +168,93 @@ export function size(mesh: Mesh, idx: Iterable<number>): [number, number, number
       }
     }
   }
+  return { lo, hi };
+}
+
+export function size(mesh: Mesh, idx: Iterable<number>): [number, number, number] {
+  const { lo, hi } = box(mesh, idx);
   return [hi[0]! - lo[0]!, hi[1]! - lo[1]!, hi[2]! - lo[2]!];
+}
+
+/**
+ * Two boxes closer than this are the same piece. A nozzle is 0.4 mm wide: nothing nearer than that was meant to be
+ * pulled apart, and a print-in-place joint — a pin in its socket, a bone laid across the next one — is nearer still.
+ */
+export const TOGETHER = 0.4;
+
+/** Whether two boxes meet, allowing for that width. */
+function meet(a: Box, b: Box): boolean {
+  for (let d = 0; d < 3; d++) {
+    if (Math.min(a.hi[d]!, b.hi[d]!) - Math.max(a.lo[d]!, b.lo[d]!) < -TOGETHER) return false;
+  }
+  return true;
+}
+
+/**
+ * The pieces an object really is. Shells whose boxes meet belong to one piece — that is what holds a figure printed
+ * in place together, bones laid across each other and joints inside their sockets alike. Shells that sit clear of
+ * each other are separate pieces, which is what a Bambu "combined body" (组合体) is: two parts exported as one
+ * object, one piece to any slicer, impossible to move, orient or set apart.
+ *
+ * A fragment too small to be a part of its own — a stray shard of a bad mesh — joins the piece it lies nearest,
+ * because geometry is never dropped here.
+ */
+export function pieces(mesh: Mesh, groups: number[][], minTris = 20): number[][] {
+  if (groups.length < 2) return groups;
+  const boxes = groups.map((g) => box(mesh, g));
+  const parent = groups.map((_, i) => i);
+  const find = (i: number): number => {
+    let x = i;
+    while (parent[x] !== x) x = parent[x] = parent[parent[x]!]!;
+    return x;
+  };
+  for (let i = 0; i < groups.length; i++) {
+    for (let j = i + 1; j < groups.length; j++) {
+      if (!meet(boxes[i]!, boxes[j]!)) continue;
+      const a = find(i);
+      const b = find(j);
+      if (a !== b) parent[b] = a;
+    }
+  }
+  const order: number[] = [];
+  const members = new Map<number, number[]>();
+  for (let i = 0; i < groups.length; i++) {
+    const root = find(i);
+    const list = members.get(root);
+    if (list) list.push(i);
+    else {
+      members.set(root, [i]);
+      order.push(root);
+    }
+  }
+  const parts = order.map((root) => {
+    const shellsOf = members.get(root)!;
+    return {
+      tris: shellsOf.flatMap((i) => groups[i]!).sort((a, b) => a - b),
+      box: shellsOf.map((i) => boxes[i]!).reduce((a, b) => ({
+        lo: [Math.min(a.lo[0]!, b.lo[0]!), Math.min(a.lo[1]!, b.lo[1]!), Math.min(a.lo[2]!, b.lo[2]!)],
+        hi: [Math.max(a.hi[0]!, b.hi[0]!), Math.max(a.hi[1]!, b.hi[1]!), Math.max(a.hi[2]!, b.hi[2]!)],
+      })),
+    };
+  });
+
+  // A shard joins its nearest neighbour rather than standing on the plate as an object of its own.
+  const centre = (b: Box) => [0, 1, 2].map((d) => (b.lo[d]! + b.hi[d]!) / 2);
+  const keep = parts.filter((p) => p.tris.length >= minTris);
+  if (!keep.length) return parts.map((p) => p.tris);
+  for (const shard of parts) {
+    if (shard.tris.length >= minTris) continue;
+    const c = centre(shard.box);
+    let best = keep[0]!;
+    let bestAway = Infinity;
+    for (const part of keep) {
+      const k = centre(part.box);
+      const away = (k[0]! - c[0]!) ** 2 + (k[1]! - c[1]!) ** 2 + (k[2]! - c[2]!) ** 2;
+      if (away < bestAway) { bestAway = away; best = part; }
+    }
+    best.tris = [...best.tris, ...shard.tris].sort((a, b) => a - b);
+  }
+  return keep.map((p) => p.tris);
 }
 
 function* every(n: number): Generator<number> {
@@ -190,6 +288,8 @@ export interface SplitObject {
   name: string;
   triangles: number;
   shellCount: number;
+  /** How many pieces those shells really make: shells that meet are one piece. */
+  pieceCount: number;
   /** The six largest shells, as they would be written. */
   shells: SplitShell[];
   written: SplitWritten[];
@@ -223,8 +323,9 @@ export async function split(project: string, options: SplitOptions = {}): Promis
     for (const { objectId, mesh } of await itemMeshes(zip)) {
       const name = names.get(objectId) || `object${objectId}`;
       const groups = shells(mesh);
+      const parts = pieces(mesh, groups, minTris);
       const object: SplitObject = {
-        objectId, name, triangles: mesh.tris.length / 3, shellCount: groups.length,
+        objectId, name, triangles: mesh.tris.length / 3, shellCount: groups.length, pieceCount: parts.length,
         shells: groups.slice(0, 6).map((g) => ({ triangles: g.length, size: size(mesh, g) })),
         written: [], skipped: [],
       };
@@ -243,11 +344,20 @@ export async function split(project: string, options: SplitOptions = {}): Promis
           object.written.push({ path, triangles: g.length, size: size(mesh, g), whole: false });
           result.written.push(path);
         }
-      } else {
+      } else if (parts.length < 2) {
         const path = join(out, `${safe}.stl`);
         const triangles = writeStl(path, mesh, null);
         object.written.push({ path, triangles, size: size(mesh, every(triangles)), whole: true });
         result.written.push(path);
+      } else {
+        // Whole, but not welded: the pieces an object is really made of are written one STL each, or the parts a
+        // project kept apart come back from the mesh as one lump.
+        parts.forEach((part, i) => {
+          const path = join(out, `${safe}-piece${i + 1}.stl`);
+          writeStl(path, mesh, part);
+          object.written.push({ path, triangles: part.length, size: size(mesh, part), whole: true });
+          result.written.push(path);
+        });
       }
     }
     return result;

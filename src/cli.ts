@@ -5,7 +5,7 @@
  *   state              what is true right now: Flash Studio, its presets, the work folder (read-only)
  *   inspect FILE       what a file is, and what its designer said; SLICE / CONVERT / CHECK / REFUSE
  *   check FILE.gcode   hold a G-code to the printer's ratings; exit 2 = do not print it (read-only)
- *   split PROJECT.3mf  shells per object; --split ID… writes one STL per shell, every other object whole
+ *   split PROJECT.3mf  shells and pieces per object; --split ID… one STL per shell, every other object whole
  *   convert INPUT…     turn a Bambu project (or meshes) into a Flash Studio project for the AD5M 0.4, checked
  *   open FILE.3mf      open a finished project in Flash Studio, to slice and print from there
  */
@@ -126,6 +126,7 @@ async function cmdConvert(argv: string[]): Promise<number> {
     ...(flags.has("out") ? { out: String(flags.get("out")) } : {}),
     keep: flags.has("keep"),
     fromMesh: flags.has("from-mesh"),
+    keepMerged: flags.has("keep-merged"),
     arrange: !flags.has("no-arrange"),
     overrides: all(argv, "set"),
     dryRun: flags.has("dry-run"),
@@ -161,6 +162,13 @@ async function cmdConvert(argv: string[]): Promise<number> {
   if (result.plateNames?.length) {
     console.log("plate names — taken out of the copy the slicer read, its command line crashes on a named plate:");
     for (const n of result.plateNames) console.log(`  ${n}`);
+  }
+  for (const o of result.separated?.objects ?? []) {
+    const sizes = o.sizes.map((v) => v.map((n) => n.toFixed(1)).join("×")).join(", ");
+    console.log(`parts merged into one object — '${o.name}' is ${o.pieces}, taken apart where they sat: ${sizes} mm`);
+  }
+  for (const h of result.separated?.held ?? []) {
+    console.log(warn(`'${h.name}' is ${h.pieces} parts merged into one object, left that way — ${h.why}`));
   }
   if (result.variants?.keys.length) {
     console.log(`nozzle kinds — the project names ${result.variants.kinds.join(" and ")}, the 5M has one; their lists were taken out of the copy the slicer read:`);
@@ -216,7 +224,8 @@ async function cmdSplit(argv: string[]): Promise<number> {
   });
   for (const o of result.objects) {
     const list = o.shells.map((sh) => `${sh.triangles} tris ${sh.size.map((v) => v.toFixed(0)).join("×")} mm`).join(", ");
-    console.log(`object ${o.objectId} '${o.name}': ${o.triangles} triangles, ${o.shellCount} shell(s): ${list}${o.shellCount > 6 ? " …" : ""}`);
+    const pieces = o.pieceCount > 1 ? ` in ${o.pieceCount} pieces that sit apart` : " in one piece";
+    console.log(`object ${o.objectId} '${o.name}': ${o.triangles} triangles, ${o.shellCount} shell(s)${pieces}: ${list}${o.shellCount > 6 ? " …" : ""}`);
     for (const n of o.skipped) console.log(warn(`  skipped a ${n}-triangle fragment`));
     for (const w of o.written) {
       console.log(ok(`  ${basename(w.path)}  ${w.whole ? `whole, ${w.triangles} tris` : `${mm(w.size, 1)} mm, ${w.triangles} tris`}`));
@@ -248,11 +257,13 @@ switch (command) {
   state              what is true right now: Flash Studio, its presets, the work folder (read-only)
   inspect FILE       what a file is, and what its designer said; SLICE / CONVERT / CHECK / REFUSE
   check FILE.gcode   hold a G-code to the printer's ratings; exit 2 = do not print it (read-only)
-  split PROJECT.3mf  shells per object; --split ID… one STL per shell, every other object whole (--split none: all whole)
+  split PROJECT.3mf  shells and pieces per object; --split ID… one STL per shell, every other object whole
+                     (--split none: all whole — but a piece that sits clear of the rest is still its own STL)
   convert INPUT…     turn a Bambu project (or meshes) into a Flash Studio project for the AD5M 0.4, checked;
                      one .3mf lands in the out folder (~/3dprint/out/ by default), the proof slice is thrown away
                      --process 0.12|0.20|0.24  --filament NAME  --set KEY=VALUE  --name STEM  --out DIR
                      --from-mesh (when the slicer crashes on the project)  --keep (keep the work folder)
+                     --keep-merged (leave an object that is really several parts welded into one)
   open FILE.3mf      open a finished project in Flash Studio, to slice and print from there`);
     code = command ? 1 : 0;
 }

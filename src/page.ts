@@ -658,6 +658,15 @@ function renderChanges(r) {
   const box = $("#changes");
   box.textContent = "";
   const blocks = [];
+  if (r.separated && r.separated.objects.length) {
+    blocks.push(change("Parts merged into one object, taken apart", "Each piece is an object of its own now, where it sat — move, orient and set them apart.",
+      r.separated.objects.map((o) => o.name + ": " + o.pieces + " pieces — "
+        + o.sizes.map((s) => s.map((v) => v.toFixed(1)).join("×")).join(", ") + " mm")));
+  }
+  if (r.separated && r.separated.held.length) {
+    blocks.push(change("Parts merged into one object, left as they are", null,
+      r.separated.held.map((h) => h.name + ": " + h.pieces + " parts — " + h.why)));
+  }
   if (r.variants && r.variants.keys.length) {
     blocks.push(change("Nozzle kinds taken out", "The project names " + r.variants.kinds.join(" and ") + "; the 5M has one.",
       null, r.variants.keys.join(", ")));

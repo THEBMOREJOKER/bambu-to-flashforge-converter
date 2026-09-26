@@ -72,6 +72,7 @@ test("a report counts the shells and writes nothing", async () => {
   assert.equal(o.name, "two parts.stl");
   assert.equal(o.triangles, 9);
   assert.equal(o.shellCount, 3);
+  assert.equal(o.pieceCount, 3);   // three shells that all sit clear of each other
   assert.deepEqual(o.shells.map((s) => s.triangles), [4, 4, 1]);
   assert.deepEqual(o.shells[1]!.size, [2, 2, 2]);
   assert.equal(existsSync(out), false);
@@ -92,12 +93,30 @@ test("--split ID writes one STL per shell, placed as the project places it, and 
   assert.equal(bytes.readUInt32LE(80), 4);
 });
 
-test("an id that matches nothing writes every object whole", async () => {
+test("an id that matches nothing writes every object whole — but never welds its pieces together", async () => {
   const out = join(scratch(), "split");
-  const r = await split(project(), { ids: ["none"], out });
-  assert.equal(r.written.length, 1);
-  const whole = stlInfo(r.written[0]!);
-  assert.equal(whole.triangles, 9);
-  assert.deepEqual(whole.max, [19.5, 9.5, 2]);
+  const r = await split(project(), { ids: ["none"], out, minTris: 2 });
+  assert.deepEqual(r.written.map((p) => p.slice(out.length + 1)), ["two_parts-piece1.stl", "two_parts-piece2.stl"]);
+  const first = stlInfo(r.written[0]!);
+  assert.equal(first.triangles, 4);
+  assert.deepEqual(first.max, [11, 1, 1]);
+  // The stray triangle is too small to stand as a piece of its own, so it joins the piece it lies nearest.
+  const second = stlInfo(r.written[1]!);
+  assert.equal(second.triangles, 5);
+  assert.deepEqual(second.max, [19.5, 9.5, 2]);
+});
+
+test("one piece is still one STL", async () => {
+  const out = join(scratch(), "split");
+  const one = MODEL.replace(/<vertex x="5"/g, '<vertex x="0.5"').replace(/<vertex x="7"/, '<vertex x="1.5"')
+    .replace(/<vertex x="9(\.5)?"/g, '<vertex x="0.9"');
+  const path = join(scratch(), "one.3mf");
+  writeZip(path, [
+    { name: "3D/3dmodel.model", data: Buffer.from(one) },
+    { name: "Metadata/model_settings.config", data: Buffer.from(SETTINGS) },
+  ]);
+  const r = await split(path, { ids: ["none"], out, minTris: 2 });
+  assert.deepEqual(r.written.map((p) => p.slice(out.length + 1)), ["two_parts.stl"]);
+  assert.equal(r.objects[0]!.pieceCount, 1);
 });
 
