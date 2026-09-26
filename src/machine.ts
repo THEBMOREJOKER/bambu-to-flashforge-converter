@@ -90,10 +90,13 @@ function findAppImage(): string {
 
 export const APPIMAGE = findAppImage();
 /**
- * Flash Studio's system presets, which it unpacks on first launch: one folder per vendor, each with an index
- * (`<Vendor>.json`) naming every file. FLASH_STUDIO_CONFIG points somewhere else.
+ * Flash Studio's settings folder, which it unpacks its system presets into on first launch: one folder per vendor,
+ * each with an index (`<Vendor>.json`) naming every file. FLASH_STUDIO_CONFIG points somewhere else — and whatever
+ * it points at is what the slicer is told to use (`--datadir`), so presets are read from the same folder the run
+ * writes to, and a second build of Flash Studio never disturbs the settings of the one you slice with by hand.
  */
-export const SYSTEM = join(process.env["FLASH_STUDIO_CONFIG"] ?? join(HOME, ".config/Orca-Flashforge"), "system");
+export const DATADIR = process.env["FLASH_STUDIO_CONFIG"] ?? join(HOME, ".config/Orca-Flashforge");
+export const SYSTEM = join(DATADIR, "system");
 export const PROFILES = join(SYSTEM, "Flashforge");
 /** Flash Studio's own filament library — the "@System" presets its filament list offers for any printer. */
 export const LIBRARY = join(SYSTEM, "OrcaFilamentLibrary");

@@ -55,6 +55,7 @@ function cmdState(): number {
   console.log(`b2f state — ${new Date(s.when).toLocaleString()}`);
   console.log("\nFlash Studio");
   console.log(s.slicer.found ? ok(`AppImage: ${s.slicer.appImage}`) : bad(`no AppImage at ${s.slicer.appImage}`));
+  console.log(ok(`settings folder: ${s.slicer.datadir} (the slicer is told to use this one and no other)`));
   console.log(s.slicer.certificates ? ok("certificate bundle present (answers the AppImage's first-launch prompt)") : bad("no certificate bundle"));
   console.log(s.slicer.profiles ? ok("Adventurer 5M 0.4 presets present") : bad(`presets missing: ${s.slicer.missing.map((p) => basename(p)).join(", ")}`));
   console.log(`\nwork  ${s.work.root}  in/: ${s.work.in.length} file(s), out/: ${s.work.out.length}`);

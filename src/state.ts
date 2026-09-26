@@ -5,14 +5,14 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { APPIMAGE, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SSL_CERT, WORKDIR } from "./machine.js";
+import { APPIMAGE, DATADIR, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SSL_CERT, WORKDIR } from "./machine.js";
 import { findPreset } from "./presets.js";
 
 export interface WorkFile { name: string; path: string; bytes: number; modified: number; }
 
 export interface State {
   when: string;
-  slicer: { appImage: string; found: boolean; certificates: boolean; profiles: boolean; missing: string[] };
+  slicer: { appImage: string; datadir: string; found: boolean; certificates: boolean; profiles: boolean; missing: string[] };
   work: { root: string; in: WorkFile[]; out: WorkFile[] };
   blocks: string[];
   next: string;
@@ -50,7 +50,7 @@ export function state(): State {
   const inDir = join(WORKDIR, "in");
   return {
     when: new Date().toISOString(),
-    slicer: { appImage: APPIMAGE, found, certificates: existsSync(SSL_CERT), profiles: missing.length === 0, missing },
+    slicer: { appImage: APPIMAGE, datadir: DATADIR, found, certificates: existsSync(SSL_CERT), profiles: missing.length === 0, missing },
     work: { root: WORKDIR, in: listFiles(inDir), out: listFiles(OUTDIR) },
     blocks,
     next: blocks[0] ?? `put a model in ${inDir} and inspect it`,

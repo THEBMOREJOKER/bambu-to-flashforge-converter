@@ -6,7 +6,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 
-import { APPIMAGE, SSL_CERT } from "./machine.js";
+import { APPIMAGE, DATADIR, SSL_CERT } from "./machine.js";
 
 export interface OpenResult { ok: boolean; pid?: number; error?: string; }
 
@@ -17,7 +17,7 @@ export function openInFlashStudio(path: string): OpenResult {
     return { ok: false, error: "no display to open a window on — start the app from the desktop icon" };
   }
   try {
-    const child = spawn(APPIMAGE, [path], {
+    const child = spawn(APPIMAGE, ["--datadir", DATADIR, path], {
       detached: true,
       stdio: "ignore",
       env: { ...process.env, SSL_CERT_FILE: SSL_CERT },

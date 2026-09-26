@@ -19,7 +19,7 @@ import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
-import { APPIMAGE, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SSL_CERT } from "./machine.js";
+import { APPIMAGE, DATADIR, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SSL_CERT } from "./machine.js";
 import { applyOverrides, findPreset, type Replaced, selectableFor5M, settingsDiff, writeFlatPreset } from "./presets.js";
 import { check, type CheckResult } from "./gcode.js";
 import { plateMap, type PlateMap } from "./platemap.js";
@@ -420,6 +420,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   const exported = `${stem}-ad5m.3mf`;
   const command = [
     APPIMAGE, "--debug", "1",
+    "--datadir", DATADIR,          // the settings folder the presets were read from, and no other
     "--load-settings", `${machine.file};${flatProcess.file}`,
     "--load-filaments", Array.from({ length: slots }, () => filament.file).join(";"),
     "--allow-newer-file",          // bare switches: a 1 after them is read as a file name
