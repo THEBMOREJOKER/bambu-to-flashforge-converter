@@ -19,12 +19,13 @@ import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
-import { APPIMAGE, DATADIR, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SSL_CERT } from "./machine.js";
+import { APPIMAGE, BED_Z, DATADIR, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SSL_CERT } from "./machine.js";
 import { applyOverrides, findPreset, type Replaced, selectableFor5M, settingsDiff, writeFlatPreset } from "./presets.js";
 import { check, type CheckResult } from "./gcode.js";
 import { plateMap, type PlateMap } from "./platemap.js";
 import { type HeldObject, separation, type SeparatedObject } from "./separate.js";
 import { split } from "./split.js";
+import { thicken, type ThickenedObject } from "./thicken.js";
 import {
   blankPlateNames, type Collapse, collapseFilaments, extruderVariants, type Notes, notes, type ObjectSetting,
   objectSettings, outOfRangeKeys, modelSettings, oneSlot, type OneSlot, projectSettings, sliceWarnings,
@@ -42,6 +43,11 @@ export interface ConvertOptions {
   /** "0" slices every plate. */
   plate?: string;
   scale?: number;
+  /**
+   * Same footprint, this many times as thick — the world Z of every object on the plate. The slicer's own `--scale`
+   * is one factor in every direction and cannot do it. Needs a project: a mesh has no placement to scale.
+   */
+  scaleZ?: number;
   arrange?: boolean;
   name?: string;
   /** Where the finished project goes. Default: the out folder. */
@@ -112,6 +118,8 @@ export interface ConvertResult {
   notCarried?: string[];
   /** Objects that were several parts merged into one, taken apart in the copy the slicer read — and any left as they are. */
   separated?: { objects: SeparatedObject[]; held: HeldObject[] };
+  /** Every object made thicker in the copy the slicer read, as it stood and as it stands. */
+  thickened?: { factor: number; objects: ThickenedObject[] };
   /** What to do next when this did not work. */
   advice?: string;
   /** The slicer crashed on the project file: the mesh taken out whole is the way through. */
@@ -256,6 +264,14 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   }
   const isProject = low.endsWith(".3mf");
   const fromMesh = Boolean(options.fromMesh) && isProject;
+  const thicker = options.scaleZ ?? 1;
+  if (!Number.isFinite(thicker) || thicker <= 0) return fail("--scale-z must be a number greater than 0");
+  if (thicker !== 1 && !isProject) {
+    return fail("--scale-z needs a project (.3mf): a mesh carries no placement to scale — convert it first, then thicken that");
+  }
+  if (thicker !== 1 && fromMesh) {
+    return fail("--scale-z and --from-mesh do not go together: the mesh is sliced on its own, and the placement --scale-z scales is the project's");
+  }
   let last = 0;
   const progress = (stage: Progress["stage"], percent: number, text: string, extra: Partial<Progress> = {}): void => {
     last = Math.max(0, Math.min(100, Math.round(percent)));
@@ -293,6 +309,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   let carried: ObjectSetting[] = [];
   let merged: ObjectSetting[] = [];
   let apart: Awaited<ReturnType<typeof separation>> = null;
+  let thick: Awaited<ReturnType<typeof thicken>> = null;
   if (isProject) {
     const zip = new Zip(first);
     try {
@@ -316,10 +333,33 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
           progress("prepare", 1, "reading the model to see what each object is really made of");
           apart = await separation(zip);
         }
+        if (thicker !== 1) {
+          progress("prepare", 2, `measuring every object, to make it ${thicker}× as thick`);
+          thick = await thicken(zip, thicker);
+        }
       }
     } finally {
       zip.close();
     }
+  }
+
+  // A refusal after the work folder exists takes the folder with it.
+  const stop = (advice: string): ConvertResult => {
+    rmSync(work, { recursive: true, force: true });
+    return { ...fail(advice, 2), notes: projectNotes };
+  };
+  if (thick && apart?.objects.length) {
+    return stop(
+      "--scale-z and taking a welded object apart rewrite the same build items, and the pieces stand on placements this "
+      + "pass has not measured. Convert once as it is, then thicken that file — or add --keep-merged to leave the object welded.",
+    );
+  }
+  if (thick && thick.maxZ > BED_Z) {
+    const tallest = [...thick.objects].sort((a, b) => b.after[2] - a.after[2])[0];
+    return stop(
+      `${thicker}× as thick puts '${tallest?.name}' ${thick.maxZ.toFixed(1)} mm tall, over the ${BED_Z} mm the bed has: `
+      + `${(BED_Z / (thick.maxZ / thicker)).toFixed(2)}× is as thick as this plate goes.`,
+    );
   }
 
   // The way round a project file the slicer crashes on: every object written whole as an STL, and those sliced.
@@ -386,6 +426,10 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
         const current = changes["Metadata/model_settings.config"]?.toString("utf8") ?? modelXml;
         Object.assign(changes, apart.members(zip, current));
       }
+      if (thick) {
+        const current = changes["Metadata/model_settings.config"]?.toString("utf8") ?? modelXml;
+        Object.assign(changes, thick.members(zip, current));
+      }
       copyZipWith(zip, cleanedPath, changes);
     } finally {
       zip.close();
@@ -395,7 +439,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   const collapsed = collapse && (collapse.moved.length || collapse.dropped.length || collapse.kept.length)
     ? { moved: collapse.moved, dropped: collapse.dropped, kept: collapse.kept }
     : undefined;
-  if (single || broken.length || plateNames.length || variants.keys.length || apart?.objects.length
+  if (single || broken.length || plateNames.length || variants.keys.length || apart?.objects.length || thick
     || (collapse && Object.keys(collapse.members).length)) {
     sliceInputs = [writeCleaned([])];
     for (const m of collapse?.moved ?? []) options.onLine?.(`one extruder: ${m}`);
@@ -408,6 +452,10 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   for (const n of plateNames) options.onLine?.(`plate name taken out of the copy the slicer reads, its command line crashes on one — ${n}`);
   if (variants.keys.length) {
     options.onLine?.(`one kind of nozzle: the project names ${variants.kinds.join(" and ")}, the 5M has one — their lists come out of the copy the slicer reads: ${variants.keys.join(", ")}`);
+  }
+  for (const o of thick?.objects ?? []) {
+    const mm = (v: [number, number, number]) => v.map((n) => n.toFixed(1)).join(" × ");
+    options.onLine?.(`${thicker}× as thick, same footprint: '${o.name}' ${mm(o.before)} → ${mm(o.after)} mm`);
   }
   for (const o of apart?.objects ?? []) {
     const sizes = o.sizes.map((s) => s.map((v) => v.toFixed(1)).join(" × ")).join(", ");
@@ -445,6 +493,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     ...(variants.keys.length ? { variants } : {}),
     ...(notCarried.length ? { notCarried } : {}),
     ...(apart ? { separated: { objects: apart.objects, held: apart.held } } : {}),
+    ...(thick ? { thickened: { factor: thick.factor, objects: thick.objects } } : {}),
   };
   const finish = (keep: boolean): boolean => {
     if (keep) return true;

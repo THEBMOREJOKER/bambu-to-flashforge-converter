@@ -123,6 +123,7 @@ async function cmdConvert(argv: string[]): Promise<number> {
     ...(flags.has("filament") ? { filament: String(flags.get("filament")) } : {}),
     ...(flags.has("plate") ? { plate: String(flags.get("plate")) } : {}),
     ...(flags.has("scale") ? { scale: Number(flags.get("scale")) } : {}),
+    ...(flags.has("scale-z") ? { scaleZ: Number(flags.get("scale-z")) } : {}),
     ...(flags.has("name") ? { name: String(flags.get("name")) } : {}),
     ...(flags.has("out") ? { out: String(flags.get("out")) } : {}),
     keep: flags.has("keep"),
@@ -163,6 +164,13 @@ async function cmdConvert(argv: string[]): Promise<number> {
   if (result.plateNames?.length) {
     console.log("plate names — taken out of the copy the slicer read, its command line crashes on a named plate:");
     for (const n of result.plateNames) console.log(`  ${n}`);
+  }
+  if (result.thickened) {
+    console.log(`${result.thickened.factor}× as thick, same footprint — in the copy the slicer read:`);
+    for (const o of result.thickened.objects) {
+      const mm = (v: [number, number, number]) => v.map((n) => n.toFixed(1)).join(" × ");
+      console.log(`  '${o.name}' ${mm(o.before)} → ${mm(o.after)} mm`);
+    }
   }
   for (const o of result.separated?.objects ?? []) {
     const sizes = o.sizes.map((v) => v.map((n) => n.toFixed(1)).join("×")).join(", ");
@@ -263,6 +271,7 @@ switch (command) {
   convert INPUT…     turn a Bambu project (or meshes) into a Flash Studio project for the AD5M 0.4, checked;
                      one .3mf lands in the out folder (~/3dprint/out/ by default), the proof slice is thrown away
                      --process 0.12|0.20|0.24  --filament NAME  --set KEY=VALUE  --name STEM  --out DIR
+                     --scale F (every direction)  --scale-z F (same footprint, F times as thick)
                      --from-mesh (when the slicer crashes on the project)  --keep (keep the work folder)
                      --keep-merged (leave an object that is really several parts welded into one)
   open FILE.3mf      open a finished project in Flash Studio, to slice and print from there`);

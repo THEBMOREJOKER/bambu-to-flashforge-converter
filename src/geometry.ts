@@ -187,3 +187,34 @@ export async function placedObjects(zip: Zip): Promise<PlacedObject[]> {
     };
   });
 }
+
+/** The twelve numbers again, the way a 3MF writes them: the 3×3 row-major, then the translation. */
+export function formatTransform(m: Matrix): string {
+  const n = (v: number): string => {
+    const s = v.toFixed(9).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+    return s === "-0" ? "0" : s;
+  };
+  return [...m.r[0], ...m.r[1], ...m.r[2], ...m.t].map(n).join(" ");
+}
+
+/**
+ * Every world Z multiplied by a factor, and the footprint left exactly as it was — how thick a part is as it lies
+ * on the bed. 3MF is a row-vector convention (p' = p · M + t), so a scale that happens *after* the project's own
+ * transform lands on the third column of the 3×3 and on the translation's Z, whatever rotation the object already
+ * carries. Scaling the matrix rather than the mesh means a 192 MB mesh is never rewritten.
+ */
+export function scaleWorldZ(m: Matrix, factor: number): Matrix {
+  return {
+    r: [
+      [m.r[0][0], m.r[0][1], m.r[0][2] * factor],
+      [m.r[1][0], m.r[1][1], m.r[1][2] * factor],
+      [m.r[2][0], m.r[2][1], m.r[2][2] * factor],
+    ],
+    t: [m.t[0], m.t[1], m.t[2] * factor],
+  };
+}
+
+/** The same transform, moved up or down in world Z — what puts a scaled object's base back where it stood. */
+export function liftZ(m: Matrix, dz: number): Matrix {
+  return { r: m.r, t: [m.t[0], m.t[1], m.t[2] + dz] };
+}
