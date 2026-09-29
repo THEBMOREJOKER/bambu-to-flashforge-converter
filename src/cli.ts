@@ -147,6 +147,10 @@ async function cmdConvert(argv: string[]): Promise<number> {
     console.log("the designer's notes on this model — nothing below carries them, so read them:");
     for (const [key, value] of Object.entries(result.notes)) console.log(`  ${key}: ${value.slice(0, 700)}`);
   }
+  if (result.kept.length) {
+    console.log("the designer's own settings, kept over the AD5M preset's:");
+    for (const k of result.kept) console.log(`  ${k.key}: ${k.now} (the preset has ${k.was})`);
+  }
   if (result.overrides.length) {
     console.log("your own choices, on top of the process preset:");
     for (const o of result.overrides) console.log(`  ${o.key}: ${o.was} → ${o.now}`);

@@ -140,6 +140,43 @@ export function settingsDiff(project: Preset, flat: Preset, keys: readonly strin
 export const PRESET_ONLY = /temperature|_temp|speed|accel|flow|volumetric|machine_|_fan|retract|pressure/i;
 
 /**
+ * Model-facing keys the 5M's preset still owns: the layer height is the process you picked, the
+ * compensations are this printer's calibration, and the prime tower and print sequence follow its one extruder and
+ * its gantry.
+ */
+export const PRINTER_KEEPS: ReadonlySet<string> = new Set([
+  "layer_height", "initial_layer_print_height", "elefant_foot_compensation", "xy_hole_compensation",
+  "xy_contour_compensation", "enable_prime_tower", "print_sequence",
+]);
+
+/**
+ * The designer's decisions about how the part is built — supports, brim, infill, walls — carried from the project
+ * onto the flattened process, so the preset no longer replaces them. The slicer is handed the preset on its command
+ * line, which outranks what the project carries; without this a part that needs supports is sliced without them.
+ */
+export function carryDesigner(flatPath: string, project: Preset): Replaced[] {
+  const flat = JSON.parse(readFileSync(flatPath, "utf8")) as Preset;
+  const kept: Replaced[] = [];
+  for (const key of MODEL_FACING) {
+    if (PRINTER_KEEPS.has(key) || PRESET_ONLY.test(key) || !(key in project) || !(key in flat)) continue;
+    const was = firstOf(flat[key]);
+    const now = firstOf(project[key]);
+    if (was === now || now === "") continue;
+    kept.push({ key, was, now });
+    flat[key] = Array.isArray(flat[key]) ? [now] : now;
+  }
+  writeFileSync(flatPath, `${JSON.stringify(flat, null, 2)}\n`);
+  return kept;
+}
+
+/** Put the preset's own values back on keys the slicer refused from the project. */
+export function restorePreset(flatPath: string, preset: Preset, keys: readonly string[]): void {
+  const flat = JSON.parse(readFileSync(flatPath, "utf8")) as Preset;
+  for (const key of keys) if (key in preset) flat[key] = preset[key];
+  writeFileSync(flatPath, `${JSON.stringify(flat, null, 2)}\n`);
+}
+
+/**
  * Your own decisions about the part — brim, infill, walls — on top of a flattened preset, recorded in
  * the file the slicer is handed so the G-code header reads back what was asked for.
  */

@@ -682,7 +682,8 @@ function renderChanges(r) {
     blocks.push(change("Values Flash Studio refuses, dropped", "The AD5M preset supplies them.", null, r.droppedKeys.join(", ")));
   }
   if (r.notCarried && r.notCarried.length) blocks.push(change("Not carried from the project", null, r.notCarried));
-  if (r.overrides && r.overrides.length) blocks.push(settingsTable("Your choices, on top of the preset", r.overrides, true));
+  if (r.kept && r.kept.length) blocks.push(settingsTable("The file's own settings, kept over the preset", r.kept, true));
+  if (r.overrides && r.overrides.length) blocks.push(settingsTable("Your choices, on top of the file's", r.overrides, true));
   if (r.replaced && r.replaced.length) blocks.push(settingsTable("The project's settings the preset replaced", r.replaced, false));
   if (!blocks.length) return;
   box.appendChild(el("h2", null, "What changed for the 5M"));
@@ -920,8 +921,8 @@ export function page(filaments: string[]): string {
           [["0.12", "0.12", "fine"], ["0.20", "0.20", "standard"], ["0.24", "0.24", "draft"]], "0.20")}</div></div>
       <div class="field"><span class="label" id="brim-label">Brim</span>
         <div class="seg" role="radiogroup" aria-labelledby="brim-label">${radios("brim",
-          [["", "None", "preset"], ["auto_brim", "Auto", "where needed"], ["outer_only", "Outer", "outside only"]], "")}</div></div>
-      <div class="field"><label for="infill">Infill</label><input id="infill" type="text" placeholder="Preset (15%)"/></div>
+          [["", "As the file", "its own"], ["no_brim", "None", "no brim"], ["auto_brim", "Auto", "where needed"], ["outer_only", "Outer", "outside only"]], "")}</div></div>
+      <div class="field"><label for="infill">Infill</label><input id="infill" type="text" placeholder="As the file"/></div>
       <div class="field"><label for="name">Output name</label><input id="name" type="text" placeholder="From the file"/></div>
     </form>
     <div class="launch">

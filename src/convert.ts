@@ -20,7 +20,9 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
 import { APPIMAGE, BED_Z, DATADIR, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SSL_CERT } from "./machine.js";
-import { applyOverrides, findPreset, type Replaced, selectableFor5M, settingsDiff, writeFlatPreset } from "./presets.js";
+import {
+  applyOverrides, carryDesigner, findPreset, type Replaced, restorePreset, selectableFor5M, settingsDiff, writeFlatPreset,
+} from "./presets.js";
 import { check, type CheckResult } from "./gcode.js";
 import { plateMap, type PlateMap } from "./platemap.js";
 import { type HeldObject, separation, type SeparatedObject } from "./separate.js";
@@ -102,6 +104,8 @@ export interface ConvertResult {
   chains: { machine: string[]; process: string[]; filament: string[] };
   notes: Notes;
   replaced: Replaced[];
+  /** The designer's own supports, brim, infill and walls, carried over the preset's. */
+  kept: Replaced[];
   overrides: Replaced[];
   command: string[];
   cliExit: number | null;
@@ -248,7 +252,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   const low = first.toLowerCase();
   const fail = (advice: string, code: 1 | 2 = 1): ConvertResult => ({
     out: "", project3mf: "", delivered: false, work: "", workKept: false, plates: [], checks: [], maps: [],
-    slicerWarnings: [], chains: { machine: [], process: [], filament: [] }, notes: {}, replaced: [], overrides: [],
+    slicerWarnings: [], chains: { machine: [], process: [], filament: [] }, notes: {}, replaced: [], kept: [], overrides: [],
     command: [], cliExit: null, cliSignal: null, errorString: advice, advice, code,
   });
 
@@ -380,6 +384,8 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   const machine = writeFlatPreset(MACHINE_JSON, "machine", work);
   const flatProcess = writeFlatPreset(processPath, "process", work);
   const filament = writeFlatPreset(filamentPath, "filament", work);
+  // The designer's decisions first, then your own --set on top of them.
+  let kept = project ? carryDesigner(flatProcess.file, project) : [];
   const applied = options.overrides?.length ? applyOverrides(flatProcess.file, options.overrides) : [];
   if (project) replaced = settingsDiff(project, JSON.parse(readFileSync(flatProcess.file, "utf8")) as Record<string, unknown>);
 
@@ -486,6 +492,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     chains: { machine: machine.chain, process: flatProcess.chain, filament: filament.chain },
     notes: projectNotes,
     replaced,
+    kept,
     overrides: applied,
     command,
     ...(collapsed ? { collapsed } : {}),
@@ -522,6 +529,13 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     for (const key of outOfRangeKeys(project)) named.add(key);
     droppedKeys = [...named].filter(Boolean).sort();
     if (droppedKeys.length) {
+      // A value carried onto the preset is refused there too: the preset's own goes back.
+      const refused = kept.filter((k) => droppedKeys?.includes(k.key)).map((k) => k.key);
+      if (refused.length) {
+        restorePreset(flatProcess.file, flatProcess.flat, refused);
+        kept = kept.filter((k) => !refused.includes(k.key));
+        base.kept = kept;
+      }
       const cleaned = writeCleaned(droppedKeys);
       options.onLine?.(`the project carries values Flash Studio refuses: ${droppedKeys.join(", ")} — dropped from a cleaned copy, re-running once`);
       progress("retry", 3, `Flash Studio refused ${droppedKeys.length} of the project's values — dropped them, slicing again`);
@@ -533,6 +547,8 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   const segfault = run.signal === "SIGSEGV" || run.exit === null;
   const plates = readdirSync(work).filter((f) => f.startsWith("plate_") && f.endsWith(".gcode")).sort();
   const errorString = String(run.result["error_string"] ?? (segfault ? "the slicer crashed (segfault)" : "(no result.json)"));
+  // What the slicer says about each plate — "floating regions", an empty layer — is in result.json, not the project.
+  const plateWarnings = plateWarningsOf(run.result);
 
   if (!plates.length) {
     const retry = segfault && isProject && !fromMesh;
@@ -541,7 +557,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
       : `the slicer wrote no plate: ${errorString}`;
     progress("done", last, segfault ? "the slicer crashed" : "the slicer wrote no plate");
     return {
-      ...base, delivered: false, workKept: finish(true), plates: [], checks: [], maps: [], slicerWarnings: [],
+      ...base, delivered: false, workKept: finish(true), plates: [], checks: [], maps: [], slicerWarnings: plateWarnings,
       cliExit: run.exit, cliSignal: run.signal, errorString,
       ...(droppedKeys ? { droppedKeys } : {}), advice, ...(retry ? { meshRetry: true } : {}), code: 2,
     };
@@ -572,6 +588,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
       zip.close();
     }
   }
+  slicerWarnings = [...new Set([...plateWarnings, ...slicerWarnings])];
   for (const w of slicerWarnings) options.onLine?.(`Flash Studio warns: ${w}`);
   progress("done", delivered ? 100 : last, delivered ? "saved for Flash Studio" : worst === 2 ? "a plate failed the check" : "no project was written");
 
@@ -586,4 +603,14 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     ...(advice ? { advice } : {}),
     code: worst === 2 || !delivered ? 2 : 0,
   };
+}
+
+/** Each plate's warning in result.json, one line per warning, with the plate named when there are several. */
+export function plateWarningsOf(result: Record<string, unknown>): string[] {
+  const plates = Array.isArray(result["sliced_plates"]) ? result["sliced_plates"] as Record<string, unknown>[] : [];
+  return plates.flatMap((p) => {
+    const text = String(p["warning_message"] ?? "").trim().replace(/\s*\n\s*/g, " — ");
+    if (!text) return [];
+    return [plates.length > 1 ? `plate ${String(p["id"] ?? "?")}: ${text}` : text];
+  });
 }

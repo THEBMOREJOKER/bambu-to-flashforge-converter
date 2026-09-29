@@ -9,7 +9,9 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 
 import { LIBRARY, MACHINE_JSON } from "../src/machine.js";
-import { applyOverrides, filamentChoices, findPreset, flattenPreset, selectableFor5M, settingsDiff } from "../src/presets.js";
+import {
+  applyOverrides, carryDesigner, filamentChoices, findPreset, flattenPreset, restorePreset, selectableFor5M, settingsDiff,
+} from "../src/presets.js";
 
 // Every scratch folder a test makes goes when the file is done.
 const made: string[] = [];
@@ -34,6 +36,34 @@ test("a choice about the part is applied and reported", () => {
     { key: "brim_type", was: '"no_brim"', now: "auto_brim" },
   ]);
   assert.equal((JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>)["brim_type"], "auto_brim");
+});
+
+test("the designer's supports, brim and infill are kept over the preset's; the printer's own are not", () => {
+  const path = scratchFlat({
+    enable_support: "0", support_type: "normal(auto)", brim_type: "no_brim", sparse_infill_density: ["15%"],
+    layer_height: "0.2", enable_prime_tower: "0", elefant_foot_compensation: "0.15", wall_loops: "2",
+  });
+  const project = {
+    enable_support: "1", support_type: "tree(auto)", brim_type: "outer_only", sparse_infill_density: ["5%"],
+    layer_height: "0.16", enable_prime_tower: "1", elefant_foot_compensation: "0", wall_loops: "2",
+  };
+  assert.deepEqual(carryDesigner(path, project), [
+    { key: "sparse_infill_density", was: "15%", now: "5%" },
+    { key: "enable_support", was: "0", now: "1" },
+    { key: "support_type", was: "normal(auto)", now: "tree(auto)" },
+    { key: "brim_type", was: "no_brim", now: "outer_only" },
+  ]);
+  const flat = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  assert.deepEqual(flat["sparse_infill_density"], ["5%"]);
+  assert.equal(flat["layer_height"], "0.2");
+  assert.equal(flat["enable_prime_tower"], "0");
+  assert.equal(flat["elefant_foot_compensation"], "0.15");
+  // your --set still has the last word
+  applyOverrides(path, ["brim_type=no_brim"]);
+  assert.equal((JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>)["brim_type"], "no_brim");
+  // a value the slicer refuses goes back to the preset's
+  restorePreset(path, { support_type: "normal(auto)" }, ["support_type"]);
+  assert.equal((JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>)["support_type"], "normal(auto)");
 });
 
 test("the machine's own numbers are refused", () => {

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { convert, runCli, type SlicerReport } from "../src/convert.js";
+import { convert, plateWarningsOf, runCli, type SlicerReport } from "../src/convert.js";
 import { APPIMAGE, MACHINE_JSON } from "../src/machine.js";
 import { withZip } from "../src/zip.js";
 import { writeZip } from "../src/zipwrite.js";
@@ -141,4 +141,12 @@ test("the slicer's progress pipe is read step by step, the last report too", { s
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
+});
+
+test("each plate's warning in result.json is read, one line each", () => {
+  assert.deepEqual(plateWarningsOf({ sliced_plates: [{ id: 1, warning_message: "Body1 has floating regions" }] }),
+    ["Body1 has floating regions"]);
+  assert.deepEqual(plateWarningsOf({ sliced_plates: [{ id: 1, warning_message: "" }, { id: 2, warning_message: "Object can't be printed\nObject: a.stl" }] }),
+    ["plate 2: Object can't be printed — Object: a.stl"]);
+  assert.deepEqual(plateWarningsOf({}), []);
 });
