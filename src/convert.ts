@@ -25,6 +25,7 @@ import {
 } from "./presets.js";
 import { check, type CheckResult } from "./gcode.js";
 import { plateMap, type PlateMap } from "./platemap.js";
+import { onePlateChanges, platesOf } from "./plates.js";
 import { type HeldObject, separation, type SeparatedObject } from "./separate.js";
 import { split } from "./split.js";
 import { thicken, type ThickenedObject } from "./thicken.js";
@@ -90,6 +91,8 @@ export interface ConvertResult {
   out: string;
   /** The finished project: the one file to open in Flash Studio. Written only when every plate passed the check. */
   project3mf: string;
+  /** A project that needs more than one plate is one file per plate — pt1-, pt2- — and project3mf is the first. */
+  parts?: string[];
   delivered: boolean;
   /** The throwaway folder the slicer worked in; gone unless `workKept`. */
   work: string;
@@ -566,7 +569,67 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   progress("check", 94, plates.length > 1 ? `checking ${plates.length} plates against the 5M` : "checking the plate against the 5M");
   const checks = plates.map((p) => check(join(work, p)));
   const maps = plates.map((p) => plateMap(join(work, p)));
-  const worst = checks.some((c) => c.code === 2) ? 2 : 0;
+  let worst = checks.some((c) => c.code === 2) ? 2 : 0;
+
+  // More than one plate: one project per plate (pt1-, pt2-, …), each arranged and sliced again on a bed of its own, so
+  // no file carries a second plate and every part is checked as the file that prints it.
+  const parts: string[] = [];
+  let partFailure = "";
+  const partWarnings: string[] = [];
+  if (worst === 0 && plates.length > 1 && existsSync(join(work, exported))) {
+    progress("save", 95, `${plates.length} plates: one file per plate`);
+    let layout: ReturnType<typeof platesOf> = [];
+    const zip = new Zip(join(work, exported));
+    try {
+      if (zip.has("Metadata/model_settings.config")) layout = platesOf(zip.readText("Metadata/model_settings.config"));
+      for (const p of layout) copyZipWith(zip, join(work, `pt${p.plate}-input.3mf`), onePlateChanges(zip, p.plate, p.objects));
+    } finally {
+      zip.close();
+    }
+    if (layout.length !== plates.length) partFailure = `the project names ${layout.length} plate(s) for ${plates.length} sliced`;
+    const at = command.indexOf("--outputdir");
+    const staged: Array<{ dir: string; name: string }> = [];
+    for (const p of partFailure ? [] : layout) {
+      const name = `pt${p.plate}-${stem}-ad5m.3mf`;
+      const dir = join(work, `pt${p.plate}`);
+      mkdirSync(dir);
+      const partCommand = [...command.slice(0, at), "--outputdir", dir, join(work, `pt${p.plate}-input.3mf`)];
+      partCommand[partCommand.indexOf("--arrange") + 1] = "1";
+      partCommand[partCommand.indexOf("--export-3mf") + 1] = name;
+      options.onLine?.(`plate ${p.plate}: ${p.objects.length} object(s) → ${name}, arranged and sliced on a bed of its own`);
+      const partRun = await runCli(partCommand, dir, options.onLine);
+      for (const w of plateWarningsOf(partRun.result)) partWarnings.push(`pt${p.plate}: ${w}`);
+      const gcodes = readdirSync(dir).filter((f) => f.startsWith("plate_") && f.endsWith(".gcode"));
+      if (gcodes.length !== 1 || !existsSync(join(dir, name))) {
+        partFailure = `plate ${p.plate} does not slice onto one bed by itself (${gcodes.length} plates): `
+          + String(partRun.result["error_string"] ?? "no result");
+        break;
+      }
+      const partCheck = check(join(dir, gcodes[0] ?? ""));
+      checks.push(partCheck);
+      if (partCheck.code === 2) {
+        partFailure = `${name} failed the check`;
+        break;
+      }
+      staged.push({ dir, name });
+    }
+    if (partFailure) {
+      worst = 2;
+    } else {
+      mkdirSync(out, { recursive: true });
+      for (const { dir, name } of staged) {
+        const part = join(out, `${name}.part`);
+        const from = new Zip(join(dir, name));
+        try {
+          copyZipWith(from, part, unslicedChanges(from));
+        } finally {
+          from.close();
+        }
+        renameSync(part, join(out, name));
+        parts.push(join(out, name));
+      }
+    }
+  }
 
   // Only a project whose every plate passed goes to the out folder, and without the G-code: Flash Studio slices
   // it again when it opens it, and the file matches what Flash Studio itself saves.
@@ -576,7 +639,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     const zip = new Zip(join(work, exported));
     try {
       slicerWarnings = sliceWarnings(zip);
-      if (worst === 0) {
+      if (worst === 0 && !parts.length) {
         progress("save", 97, "writing the project for Flash Studio");
         mkdirSync(out, { recursive: true });
         const part = `${project3mf}.part`;
@@ -588,15 +651,19 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
       zip.close();
     }
   }
-  slicerWarnings = [...new Set([...plateWarnings, ...slicerWarnings])];
+  slicerWarnings = [...new Set([...plateWarnings, ...slicerWarnings, ...partWarnings])];
+  if (parts.length) delivered = true;
   for (const w of slicerWarnings) options.onLine?.(`Flash Studio warns: ${w}`);
   progress("done", delivered ? 100 : last, delivered ? "saved for Flash Studio" : worst === 2 ? "a plate failed the check" : "no project was written");
 
-  const advice = worst === 2
+  const advice = partFailure
+    ? `${partFailure} — nothing was written to ${out}; the slices are in ${work}`
+    : worst === 2
     ? `a plate failed the check — nothing was written to ${out}; the slice is in ${work}`
     : delivered ? undefined : `the slicer wrote no project file; the slice is in ${work}`;
   return {
-    ...base, delivered, workKept: finish(Boolean(options.keep) || !delivered),
+    ...base, ...(parts.length ? { project3mf: parts[0] ?? project3mf, parts } : {}),
+    delivered, workKept: finish(Boolean(options.keep) || !delivered),
     plates, checks, maps, slicerWarnings,
     cliExit: run.exit, cliSignal: run.signal, errorString,
     ...(droppedKeys ? { droppedKeys } : {}),

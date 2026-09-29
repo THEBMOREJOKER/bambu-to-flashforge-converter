@@ -114,7 +114,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       .then((result) => {
         job.result = result;
         for (const [label, chain] of Object.entries(result.chains)) job.lines.push(`${label}: ${chain.join(" → ")}`);
-        job.lines.push(result.delivered ? `saved ${result.project3mf}` : result.errorString);
+        job.lines.push(result.delivered ? `saved ${(result.parts ?? [result.project3mf]).join(", ")}` : result.errorString);
         if (result.advice) job.lines.push(result.advice);
       })
       .catch((err: unknown) => {

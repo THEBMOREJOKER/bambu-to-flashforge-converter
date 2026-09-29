@@ -206,6 +206,11 @@ async function cmdConvert(argv: string[]): Promise<number> {
     console.log(bad(result.advice ?? "nothing was saved"));
     return result.code;
   }
+  if (result.parts?.length) {
+    for (const p of result.parts) console.log(ok(`saved ${p}`));
+    console.log(`done: ${result.parts.length} plates, one file each — open them in Flash Studio one at a time, slice and print from there`);
+    return result.code;
+  }
   console.log(ok(`saved ${result.project3mf}`));
   console.log("done: the one file to open in Flash Studio — slice and print from there (b2f open FILE opens it)");
   return result.code;

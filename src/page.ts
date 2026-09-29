@@ -750,13 +750,16 @@ function renderVerdict(r) {
   if (failed) for (const l of lines) if (l.state !== "ok") box.appendChild(flag(l.state, l.text));
   for (const w of r.slicerWarnings || []) box.appendChild(flag("warn", "Flash Studio warns: " + w));
   if (r.delivered) {
+    const files = r.parts && r.parts.length ? r.parts : [r.project3mf];
     const act = el("div", "act");
-    const open = el("button", "ignite", "Open in Flash Studio");
-    open.type = "button";
-    open.onclick = () => openProject(r.project3mf, open);
-    act.appendChild(open);
+    for (const f of files) {
+      const open = el("button", "ignite", files.length > 1 ? "Open " + f.split("/").pop().split("-")[0] + " in Flash Studio" : "Open in Flash Studio");
+      open.type = "button";
+      open.onclick = () => openProject(f, open);
+      act.appendChild(open);
+    }
     box.appendChild(act);
-    box.appendChild(el("p", "fine", "Slice and print from there. Saved as " + r.project3mf));
+    box.appendChild(el("p", "fine", (files.length > 1 ? files.length + " plates, one file each. " : "") + "Slice and print from there. Saved as " + files.join(", ")));
   } else if (!failed) {
     box.appendChild(flag("bad", r.advice || "Nothing was saved."));
   }
