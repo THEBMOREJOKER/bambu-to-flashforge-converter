@@ -150,14 +150,39 @@ export const PRINTER_KEEPS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * How the supports are built, past on or off and their type: the gap they keep from the part, their interface, a
+ * tree's branches, a raft, whether a bridge is held up. Without them a designer's 1 mm gap between the supports and
+ * the part goes back to the 5M preset's 0.3.
+ */
+export const SUPPORT_KEYS = /^(support_|tree_support_|raft_)|^(enforce_support_layers|bridge_no_support|max_bridge_length)$/;
+
+/** Support keys that are not the designer's to set here: line widths, the filament slots, the machine's air. */
+const SUPPORT_NOT_CARRIED = /_line_width$|_filament$|air_filtration|chamber/;
+
+/**
+ * The process settings the designer changed from the preset they started on, as the project records them: the
+ * first entry of `different_settings_to_system`, a list joined by semicolons (the filaments and the printer follow).
+ */
+export function designerChanged(project: Preset): Set<string> {
+  const diff = project["different_settings_to_system"];
+  const first = Array.isArray(diff) ? String(diff[0] ?? "") : String(diff ?? "");
+  return new Set(first.split(";").map((key) => key.trim()).filter(Boolean));
+}
+
+/**
  * The designer's decisions about how the part is built — supports, brim, infill, walls — carried from the project
  * onto the flattened process, so the preset no longer replaces them. The slicer is handed the preset on its command
  * line, which outranks what the project carries; without this a part that needs supports is sliced without them.
+ * Every support setting the designer changed travels too; one they left alone stays the 5M's own.
  */
 export function carryDesigner(flatPath: string, project: Preset): Replaced[] {
   const flat = JSON.parse(readFileSync(flatPath, "utf8")) as Preset;
   const kept: Replaced[] = [];
-  for (const key of MODEL_FACING) {
+  const facing: readonly string[] = MODEL_FACING;
+  const support = [...designerChanged(project)]
+    .filter((key) => SUPPORT_KEYS.test(key) && !SUPPORT_NOT_CARRIED.test(key) && !facing.includes(key))
+    .sort();
+  for (const key of [...facing, ...support]) {
     if (PRINTER_KEEPS.has(key) || PRESET_ONLY.test(key) || !(key in project) || !(key in flat)) continue;
     const was = firstOf(flat[key]);
     const now = firstOf(project[key]);

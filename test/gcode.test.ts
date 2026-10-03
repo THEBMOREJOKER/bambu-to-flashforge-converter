@@ -7,7 +7,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 
-import { check, firstValue, scan } from "../src/gcode.js";
+import { check, firstValue, openBridges, plateObjects, scan } from "../src/gcode.js";
 
 // Every scratch folder a test makes goes when the file is done.
 const made: string[] = [];
@@ -128,4 +128,54 @@ test("a plate drawing from two slots fails even if it names them another way", (
   const r = check(path);
   assert.equal(r.facts.filamentMm, "130.50");
   assert.ok(r.failures.some((f) => f.includes("slots 1, 2")), r.failures.join("\n"));
+});
+
+// Layers the way the slicer writes them: a layer change, its height, then each feature under its own mark.
+const layer = (z: number, moves: string) => `;LAYER_CHANGE\n;Z:${z}\n;HEIGHT:0.2\nG1 Z${z} F600\n${moves}`;
+const wallAt = (x: number) => `;TYPE:Outer wall\nG1 X${x} Y0 F3000\nG1 X${x} Y10 E1\n`;
+const below = (moves: string) => [0.2, 0.4, 0.6, 0.8, 1].map((z) => layer(z, moves)).join("");
+const bridgeAcross = (type = "Bridge") => layer(1.2, `;TYPE:${type}\nG1 X-1 Y5 F3000\nG1 X31 Y5 E2\n`);
+
+test("a bridge over air between two walls is told by its length, and the plate still passes", () => {
+  const path = gcode(below(wallAt(0) + wallAt(30)) + bridgeAcross());
+  const [open] = openBridges(path, [{ name: "lid", box: [-2, -1, 32, 11] }]);
+  assert.ok(open && open.span > 25 && open.span < 29, `span ${open?.span}`);
+  assert.equal(open?.object, "lid");
+  assert.equal(open?.z, 1.2);
+  const r = check(path, [{ name: "lid", box: [-2, -1, 32, 11] }]);
+  assert.equal(r.code, 0);
+  assert.ok(r.warnings.some((w) => w.startsWith("lid: a ") && w.includes("bridge over air at Z 1.2 mm")), r.warnings.join(" | "));
+});
+
+test("a bridge resting on a support's interface is held, and nothing is told", () => {
+  const support = layer(1, `;TYPE:Support interface\nG1 X0 Y5 F3000\nG1 X30 Y5 E1\n`);
+  const path = gcode(below(wallAt(0) + wallAt(30)) + support + bridgeAcross());
+  assert.deepEqual(openBridges(path), []);
+  const r = check(path);
+  assert.equal(r.warnings.length, 0, r.warnings.join(" | "));
+  assert.ok(r.lines.some((l) => l.state === "ok" && l.text === "no bridge over air"));
+});
+
+test("a round wall drawn in arcs does not hold up the bridge across its hollow", () => {
+  // Each half of the ring is one arc whose chord is the very line the bridge takes. Read by its chord, the ring
+  // held the whole bridge up: a lid's 30 mm ceiling read as 4 mm.
+  const ring = ";TYPE:Outer wall\nG1 X15 Y0 F3000\nG2 X-15 Y0 I-15 J0 E3\nG2 X15 Y0 I15 J0 E3\n";
+  const path = gcode(below(ring) + layer(1.2, ";TYPE:Bridge\nG1 X-16 Y0 F3000\nG1 X16 Y0 E2\n"));
+  const [open] = openBridges(path);
+  assert.ok(open && open.span > 24 && open.span < 30, `span ${open?.span}`);
+});
+
+test("an internal bridge lies over the part's own infill and is never told", () => {
+  const path = gcode(below(wallAt(0) + wallAt(30)) + bridgeAcross("Internal Bridge"));
+  assert.deepEqual(openBridges(path), []);
+});
+
+test("a bridge is named from the plate_N.json beside the G-code, the way Flash Studio keeps them", () => {
+  const dir = scratch();
+  const path = join(dir, "plate_1.gcode");
+  writeFileSync(path, HEAD + below(wallAt(0) + wallAt(30)) + bridgeAcross());
+  writeFileSync(join(dir, "plate_1.json"), JSON.stringify({ bbox_objects: [{ name: "lid.stl", bbox: [-2, -1, 32, 11] }] }));
+  assert.ok(check(path).warnings.some((w) => w.startsWith("lid.stl: a ")));
+  assert.deepEqual(plateObjects("not json"), []);
+  assert.deepEqual(plateObjects(JSON.stringify({ bbox_objects: [{ name: "x", bbox: [0, 0, 1] }] })), []);
 });

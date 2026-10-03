@@ -740,14 +740,17 @@ function renderVerdict(r) {
   for (const c of r.checks) for (const l of c.lines) lines.push(l);
   const failed = r.checks.some((c) => c.code === 2);
   const passed = lines.filter((l) => l.state === "ok").length;
+  const warned = lines.filter((l) => l.state === "warn").length;
   box.appendChild(failed
     ? stamp("bad", "Do not print this", lines.filter((l) => l.state === "bad").length + " check(s) failed — nothing was saved")
-    : stamp("ok", "Fit to print", "Sliced for the Adventurer 5M 0.4 · " + passed + " checks passed"));
+    : stamp("ok", "Fit to print", "Sliced for the Adventurer 5M 0.4 · " + passed + " checks passed" +
+      (warned ? " · read the " + (warned === 1 ? "warning" : warned + " warnings") + " below" : "")));
   r.checks.forEach((c, n) => {
     if (r.checks.length > 1) box.appendChild(el("h3", null, "Plate " + (n + 1)));
     box.appendChild(readouts(c.facts));
   });
-  if (failed) for (const l of lines) if (l.state !== "ok") box.appendChild(flag(l.state, l.text));
+  // A failure, and anything the check warns about — a long bridge over air — shown up front, not only in the list.
+  for (const l of lines) if (l.state !== "ok") box.appendChild(flag(l.state, l.text));
   for (const w of r.slicerWarnings || []) box.appendChild(flag("warn", "Flash Studio warns: " + w));
   if (r.delivered) {
     const files = r.parts && r.parts.length ? r.parts : [r.project3mf];

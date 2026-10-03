@@ -5,12 +5,12 @@
  * through rather than by their endpoints. An endpoint-only reading misses an arc that bulges past the bed edge,
  * and reads a relative move as an absolute one; both were real gaps, both are covered by tests.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
 
 import {
-  BAMBU_MARKERS, BED_MAX, BED_MIN, BED_TEMP_KEY, BED_TOLERANCE, BED_TYPE, BED_Z, HW, NOZZLE, PRINTER_MODEL,
-  TEMP_RANGE,
+  BAMBU_MARKERS, BED_MAX, BED_MIN, BED_TEMP_KEY, BED_TOLERANCE, BED_TYPE, BED_Z, BRIDGE_UNSUPPORTED_MM, HW, NOZZLE,
+  PRINTER_MODEL, TEMP_RANGE,
 } from "./machine.js";
 
 const PARAM = /([A-Za-z])\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)/g;
@@ -225,6 +225,183 @@ export function scan(path: string): Scan {
   return s;
 }
 
+/** One object on a plate as the slicer's plate_N.json lists it: its name, and its box on the bed as X0 Y0 X1 Y1. */
+export interface PlateObject { name: string; box: [number, number, number, number]; }
+
+/** The objects of one plate, from the text of the slicer's plate_N.json. Text that does not parse names none. */
+export function plateObjects(json: string): PlateObject[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  const list = (parsed as { bbox_objects?: unknown } | null)?.bbox_objects;
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((o: { name?: unknown; bbox?: unknown }) => {
+    const box = Array.isArray(o.bbox) ? o.bbox.map(Number) : [];
+    return box.length === 4 && box.every(Number.isFinite)
+      ? [{ name: String(o.name ?? "?"), box: box as [number, number, number, number] }]
+      : [];
+  });
+}
+
+/** The plate_N.json beside a plate_N.gcode, the way Flash Studio's own model folder keeps them. */
+function besideObjects(path: string): PlateObject[] {
+  const json = path.replace(/\.gcode$/i, ".json");
+  return json !== path && existsSync(json) ? plateObjects(readFileSync(json, "utf8")) : [];
+}
+
+/** A bridge laid over air: the longest stretch of one strand with nothing printed under it, and where it is. */
+export interface OpenBridge {
+  /** mm of one strand with nothing under it. */
+  span: number;
+  /** The layer the bridge prints on. */
+  z: number;
+  x: [number, number];
+  y: [number, number];
+  /** The plate's object it belongs to, when the plate's objects are known. */
+  object?: string;
+}
+
+/** The grid the layers below a bridge are read on, and the step taken along a strand, in mm. */
+const CELL = 1;
+const STEP = 0.5;
+/**
+ * How far under a bridge to look for what holds it up: the gap a support keeps below the part (0.18 mm on the 5M's
+ * process preset) and a layer or two of the support's interface.
+ */
+const HOLD_BELOW = 1;
+/** The slicer's mark for a bridge over air. `Internal Bridge` lies over the part's own infill and is not one. */
+const BRIDGE = /^bridge( infill)?$/i;
+
+/**
+ * Every bridge in the file that crosses air, read from the slicer's own feature marks. A bridge strand is held
+ * wherever anything was printed within HOLD_BELOW under it — the part's walls at its ends, a support's interface
+ * along it — and crosses air everywhere else. One entry per object and layer, the longest first.
+ */
+export function openBridges(path: string, objects: PlateObject[] = []): OpenBridge[] {
+  const below: Array<{ z: number; cells: Set<number> }> = [];
+  let cells = new Set<number>();
+  let z = 0;
+  let type = "";
+  let px = 0, py = 0, pe = 0;
+  let absolute = true, relativeE = false;
+  const found = new Map<string, OpenBridge>();
+  const cellOf = (v: number) => Math.floor(v / CELL);
+  const keyOf = (cx: number, cy: number) => (cx + 1000) * 4000 + (cy + 1000);
+  const line = (x0: number, y0: number, x1: number, y1: number) => {
+    const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / STEP));
+    return Array.from({ length: n + 1 }, (_, i): [number, number] => [x0 + ((x1 - x0) * i) / n, y0 + ((y1 - y0) * i) / n]);
+  };
+  // An arc is walked along its curve. Read by its chord, the arcs of a round wall cut straight across the hollow
+  // they ring and hold up the very bridge that spans it (a lid's 30 mm ceiling read as 4 mm).
+  const arc = (x0: number, y0: number, x1: number, y1: number, i: number, j: number, clockwise: boolean) => {
+    const cx = x0 + i;
+    const cy = y0 + j;
+    const r = Math.hypot(x0 - cx, y0 - cy);
+    const a0 = Math.atan2(y0 - cy, x0 - cx);
+    let a1 = Math.atan2(y1 - cy, x1 - cx);
+    const full = Math.hypot(x1 - x0, y1 - y0) < 1e-9;
+    if (clockwise) {
+      if (full || a1 > a0) a1 -= 2 * Math.PI;
+    } else if (full || a1 < a0) {
+      a1 += 2 * Math.PI;
+    }
+    const n = Math.max(1, Math.ceil((Math.abs(a1 - a0) * r) / STEP));
+    return Array.from({ length: n + 1 }, (_, k): [number, number] => {
+      const a = a0 + ((a1 - a0) * k) / n;
+      return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+    });
+  };
+  const held = (x: number, y: number, layers: Array<Set<number>>) => {
+    const cx = cellOf(x), cy = cellOf(y);
+    for (const layer of layers) {
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) if (layer.has(keyOf(cx + dx, cy + dy))) return true;
+    }
+    return false;
+  };
+  const objectAt = (x: number, y: number) => {
+    let best: PlateObject | undefined;
+    for (const o of objects) {
+      const [x0, y0, x1, y1] = o.box;
+      if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+      if (!best || (x1 - x0) * (y1 - y0) < (best.box[2] - best.box[0]) * (best.box[3] - best.box[1])) best = o;
+    }
+    return best?.name;
+  };
+  const strand = (along: Array<[number, number]>) => {
+    const layers = below.filter((l) => l.z < z - 1e-6 && l.z >= z - HOLD_BELOW - 1e-6).map((l) => l.cells);
+    // The longest stretch of points in a row with nothing under them, measured along the strand.
+    let span = 0, from = -1, walked = 0;
+    let last: [number, number] | undefined;
+    for (const [x, y] of along) {
+      walked += last ? Math.hypot(x - last[0], y - last[1]) : 0;
+      last = [x, y];
+      if (held(x, y, layers)) { from = -1; continue; }
+      if (from < 0) from = walked;
+      span = Math.max(span, walked - from);
+    }
+    if (span <= 0) return;
+    const [x0, y0] = along[0] ?? [0, 0];
+    const [x1, y1] = along[along.length - 1] ?? [0, 0];
+    const object = objectAt((x0 + x1) / 2, (y0 + y1) / 2);
+    const key = `${object ?? ""}\u0000${z}`;
+    const was = found.get(key);
+    found.set(key, {
+      span: Math.max(span, was?.span ?? 0),
+      z,
+      x: [Math.min(x0, x1, was?.x[0] ?? Infinity), Math.max(x0, x1, was?.x[1] ?? -Infinity)],
+      y: [Math.min(y0, y1, was?.y[0] ?? Infinity), Math.max(y0, y1, was?.y[1] ?? -Infinity)],
+      ...(object ? { object } : {}),
+    });
+  };
+  const endLayer = () => {
+    if (cells.size) below.push({ z, cells });
+    cells = new Set<number>();
+    while (below.length && (below[0]?.z ?? 0) < z - 2 * HOLD_BELOW) below.shift();
+  };
+
+  for (const raw of readFileSync(path, "utf8").split("\n")) {
+    if (raw.startsWith(";")) {
+      if (raw.startsWith(";LAYER_CHANGE") || raw.startsWith("; CHANGE_LAYER")) endLayer();
+      const height = /^;\s*(?:Z:|Z_HEIGHT:)\s*([-\d.]+)/.exec(raw);
+      if (height) z = Number.parseFloat(height[1] ?? "0");
+      const feature = /^;\s*(?:TYPE:|FEATURE:)\s*(.+?)\s*$/.exec(raw);
+      if (feature) type = feature[1] ?? "";
+      continue;
+    }
+    const code = (raw.split(";", 1)[0] ?? "").trim();
+    if (!code) continue;
+    const word = (code.split(/\s+/, 1)[0] ?? "").toUpperCase();
+    if (word === "G90") { absolute = true; continue; }
+    if (word === "G91") { absolute = false; continue; }
+    if (word === "M82") { relativeE = false; continue; }
+    if (word === "M83") { relativeE = true; continue; }
+    if (word !== "G0" && word !== "G1" && word !== "G2" && word !== "G3" && word !== "G92") continue;
+    const p = params(code.slice(word.length));
+    if (word === "G92") {
+      if (p.has("E")) pe = p.get("E") ?? 0;
+      continue;
+    }
+    const tx = p.has("X") ? (absolute ? (p.get("X") ?? px) : px + (p.get("X") ?? 0)) : px;
+    const ty = p.has("Y") ? (absolute ? (p.get("Y") ?? py) : py + (p.get("Y") ?? 0)) : py;
+    const e = p.get("E");
+    const extrudes = e !== undefined && (relativeE ? e > 0 : e > pe);
+    if (e !== undefined && !relativeE) pe = e;
+    const curved = (word === "G2" || word === "G3") && (p.has("I") || p.has("J"));
+    if (extrudes && (curved || tx !== px || ty !== py)) {
+      const along = curved
+        ? arc(px, py, tx, ty, p.get("I") ?? 0, p.get("J") ?? 0, word === "G2")
+        : line(px, py, tx, ty);
+      if (BRIDGE.test(type)) strand(along);
+      for (const [x, y] of along) cells.add(keyOf(cellOf(x), cellOf(y)));
+    }
+    px = tx; py = ty;
+  }
+  return [...found.values()].sort((a, b) => b.span - a.span || a.z - b.z);
+}
+
 export type CheckState = "ok" | "bad" | "warn";
 export interface CheckLine { state: CheckState; text: string; }
 
@@ -247,9 +424,10 @@ export interface CheckResult {
 
 /**
  * Hold a file to the printer. Every temperature compared here comes out of the header the slicer wrote, and every
- * limit out of the machine's own preset — nothing is typed in.
+ * limit out of the machine's own preset — nothing is typed in. The plate's objects name a long bridge's part; without
+ * them the plate_N.json beside the file is read, and without that the bridge is placed by X and Y.
  */
-export function check(path: string): CheckResult {
+export function check(path: string, objects?: PlateObject[]): CheckResult {
   const h = header(path);
   const s = scan(path);
   const lines: CheckLine[] = [];
@@ -381,6 +559,34 @@ export function check(path: string): CheckResult {
   }
   if (["0", "0.00"].includes(firstValue(h.get("total filament used [g]") ?? "1"))) {
     note("filament weight 0 g: the preset has no density; the length is right, the grams are not");
+  }
+
+  // A bridge over air longer than the slicer's own limit is told, never failed: the part may still come out right.
+  const bridges = openBridges(path, objects ?? besideObjects(path));
+  const long = new Map<string, OpenBridge[]>();
+  for (const b of bridges) {
+    if (b.span <= BRIDGE_UNSUPPORTED_MM) continue;
+    const key = b.object ?? "";
+    long.set(key, [...(long.get(key) ?? []), b]);
+  }
+  const place = (b: OpenBridge) => b.object
+    ?? `the part at X ${((b.x[0] + b.x[1]) / 2).toFixed(0)} Y ${((b.y[0] + b.y[1]) / 2).toFixed(0)}`;
+  const longest = bridges[0];
+  if (!long.size) {
+    lines.push({
+      state: "ok",
+      text: longest
+        ? `bridges over air: longest ${longest.span.toFixed(1)} mm (${place(longest)}, Z ${longest.z} mm), within the slicer's ${BRIDGE_UNSUPPORTED_MM} mm`
+        : "no bridge over air",
+    });
+  }
+  for (const list of long.values()) {
+    const worst = list[0];
+    if (!worst) continue;
+    const more = list.length > 1 ? `, and ${list.length - 1} more over ${BRIDGE_UNSUPPORTED_MM} mm on this part` : "";
+    note(`${place(worst)}: a ${worst.span.toFixed(1)} mm bridge over air at Z ${worst.z} mm with nothing under it${more}`
+      + ` — longer than the slicer's own ${BRIDGE_UNSUPPORTED_MM} mm for a bridge without support; it can sag or break.`
+      + " Add supports under it (build plate only) or turn the part");
   }
 
   return {

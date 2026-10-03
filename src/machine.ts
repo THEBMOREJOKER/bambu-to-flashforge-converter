@@ -28,6 +28,13 @@ export const HW = {
   maxZSpeedMmS: 20,
 } as const;
 
+/**
+ * The longest bridge over air the slicer itself leaves without support: `max_bridge_length`, "Max length of bridges
+ * that don't need support", 10 mm by default (Orca-Flashforge 1.7.15, src/libslic3r/PrintConfig.cpp). A longer one
+ * is reported as a warning, never failed: a long bridge can sag or break, and a part may still come out right.
+ */
+export const BRIDGE_UNSUPPORTED_MM = 10;
+
 /** The 5M's stock plate, and the one Flash Studio selects for it. */
 export const BED_TYPE = "Textured PEI Plate";
 

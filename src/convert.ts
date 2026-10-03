@@ -23,7 +23,7 @@ import { APPIMAGE, BED_Z, DATADIR, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCE
 import {
   applyOverrides, carryDesigner, findPreset, type Replaced, restorePreset, selectableFor5M, settingsDiff, writeFlatPreset,
 } from "./presets.js";
-import { check, type CheckResult } from "./gcode.js";
+import { check, type CheckResult, plateObjects, type PlateObject } from "./gcode.js";
 import { plateMap, type PlateMap } from "./platemap.js";
 import { onePlateChanges, platesOf } from "./plates.js";
 import { type HeldObject, separation, type SeparatedObject } from "./separate.js";
@@ -567,7 +567,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   }
 
   progress("check", 94, plates.length > 1 ? `checking ${plates.length} plates against the 5M` : "checking the plate against the 5M");
-  const checks = plates.map((p) => check(join(work, p)));
+  const checks = plates.map((p) => check(join(work, p), exportedObjects(join(work, exported), p)));
   const maps = plates.map((p) => plateMap(join(work, p)));
   let worst = checks.some((c) => c.code === 2) ? 2 : 0;
 
@@ -605,7 +605,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
           + String(partRun.result["error_string"] ?? "no result");
         break;
       }
-      const partCheck = check(join(dir, gcodes[0] ?? ""));
+      const partCheck = check(join(dir, gcodes[0] ?? ""), exportedObjects(join(dir, name), gcodes[0] ?? ""));
       checks.push(partCheck);
       if (partCheck.code === 2) {
         partFailure = `${name} failed the check`;
@@ -670,6 +670,18 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     ...(advice ? { advice } : {}),
     code: worst === 2 || !delivered ? 2 : 0,
   };
+}
+
+/** The objects the slicer placed on a plate, from the plate_N.json in the project it exported beside the G-code. */
+export function exportedObjects(project: string, gcode: string): PlateObject[] {
+  if (!existsSync(project)) return [];
+  const zip = new Zip(project);
+  try {
+    const json = `Metadata/${gcode.replace(/\.gcode$/i, ".json")}`;
+    return zip.has(json) ? plateObjects(zip.readText(json)) : [];
+  } finally {
+    zip.close();
+  }
 }
 
 /** Each plate's warning in result.json, one line per warning, with the plate named when there are several. */

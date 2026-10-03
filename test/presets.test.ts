@@ -66,6 +66,34 @@ test("the designer's supports, brim and infill are kept over the preset's; the p
   assert.equal((JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>)["support_type"], "normal(auto)");
 });
 
+test("every support setting the designer changed travels; one they left alone stays the 5M's", () => {
+  // A designer set a 1 mm gap between the supports and the part, and the preset would put back 0.3. The top gap is
+  // Bambu's default there, not the designer's choice, so the 5M's own stands.
+  const path = scratchFlat({
+    enable_support: "0", support_type: "normal(auto)", support_object_xy_distance: "0.3",
+    support_top_z_distance: "0.18", support_line_width: "0.42", support_interface_speed: "80", support_filament: "0",
+  });
+  const project = {
+    enable_support: "1", support_type: "normal(manual)", support_object_xy_distance: "1",
+    support_top_z_distance: "0.2", support_line_width: "0.4", support_interface_speed: "50", support_filament: "2",
+    different_settings_to_system: [
+      "enable_support;support_filament;support_interface_speed;support_line_width;support_object_xy_distance;support_type",
+      "", "",
+    ],
+  };
+  assert.deepEqual(carryDesigner(path, project), [
+    { key: "enable_support", was: "0", now: "1" },
+    { key: "support_type", was: "normal(auto)", now: "normal(manual)" },
+    { key: "support_object_xy_distance", was: "0.3", now: "1" },
+  ]);
+  const flat = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  assert.equal(flat["support_object_xy_distance"], "1");
+  assert.equal(flat["support_top_z_distance"], "0.18");
+  assert.equal(flat["support_line_width"], "0.42");
+  assert.equal(flat["support_interface_speed"], "80");
+  assert.equal(flat["support_filament"], "0");
+});
+
 test("the machine's own numbers are refused", () => {
   const path = scratchFlat({ nozzle_temperature: ["220"], outer_wall_speed: "200", default_acceleration: "10000" });
   for (const bad of ["nozzle_temperature=260", "outer_wall_speed=400", "default_acceleration=30000"]) {
