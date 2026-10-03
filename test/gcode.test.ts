@@ -7,7 +7,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 
-import { check, firstValue, openBridges, plateObjects, scan } from "../src/gcode.js";
+import { check, firstValue, openBridges, plateObjects, readCommand, scan } from "../src/gcode.js";
 
 // Every scratch folder a test makes goes when the file is done.
 const made: string[] = [];
@@ -71,9 +71,15 @@ test("a relative move is resolved, not read as an absolute one", () => {
   assert.equal(check(path).code, 2);
 });
 
-test("G92 moves the origin under every later move", () => {
-  const s = scan(gcode("G1 X100 Y0 E1\nG92 X0\nG1 X60 E1\n"));
-  near(s.x[1], 100, 0.001);
+test("G92 moves the origin under every later move, and is refused for it", () => {
+  // At X 100, G92 X0 makes the file's X 60 the machine's X 160: the bed is read where the head goes.
+  const path = gcode("G1 X100 Y0 E1\nG92 X0\nG1 X60 E1\n");
+  const s = scan(path);
+  near(s.x[1], 160, 0.001);
+  assert.equal(s.stateCommands.length, 1);
+  assert.equal(check(path).code, 2);
+  assert.equal(scan(gcode("G92 E0\nG1 X10 Y10 E1\n")).stateCommands.length, 0);
+  assert.equal(scan(gcode("G92\n")).stateCommands.length, 1, "a bare G92 zeroes every axis");
 });
 
 test("max Z follows a relative lift", () => {
@@ -95,8 +101,14 @@ test("a tool change the 5M cannot make fails the check", () => {
 });
 
 test("T0 alone is the one extruder, and a Klipper macro starting with T is not a tool", () => {
-  const r = check(gcode("T0\nTIMELAPSE_TAKE_FRAME\nG1 X10 Y10 E1\n"));
-  assert.equal(r.code, 0, r.failures.join("\n"));
+  assert.equal(check(gcode("T0\nG1 X10 Y10 E1\n")).code, 0);
+  const path = gcode("T0\nTIMELAPSE_TAKE_FRAME\nG1 X10 Y10 E1\n");
+  assert.deepEqual(scan(path).tools.map((t) => t.tool), [0]);
+  // Not a tool change; a command no 5M slice carries, and failed as that.
+  const r = check(path);
+  assert.equal(r.code, 2);
+  assert.ok(r.failures.every((f) => !f.includes("one extruder")), r.failures.join("\n"));
+  assert.ok(r.failures.some((f) => f.includes("TIMELAPSE_TAKE_FRAME")), r.failures.join("\n"));
 });
 
 // A Bambu project printed from slot 2 with 0 mm on slot 1 must not read as an empty slice.
@@ -178,4 +190,96 @@ test("a bridge is named from the plate_N.json beside the G-code, the way Flash S
   assert.ok(check(path).warnings.some((w) => w.startsWith("lid.stl: a ")));
   assert.deepEqual(plateObjects("not json"), []);
   assert.deepEqual(plateObjects(JSON.stringify({ bbox_objects: [{ name: "x", bbox: [0, 0, 1] }] })), []);
+});
+
+// Eighteen lines a check that splits on spaces passes clean, while the AD5M's firmware, Klipper, would run them as
+// written. Each line follows the same clean plate; each must fail, and say why.
+const caught = (body: string, why: RegExp) => {
+  const r = check(gcode(`G1 X10 Y10 F6000\nG1 X20 Y10 E1\n${body}\n`));
+  assert.equal(r.code, 2, `${body}: passed`);
+  assert.ok(r.failures.some((f) => why.test(f)), `${body}: ${r.failures.join(" | ")}`);
+};
+
+test("the plate the eighteen lines follow is clean on its own", () => {
+  const r = check(gcode("G1 X10 Y10 F6000\nG1 X20 Y10 E1\n"));
+  assert.equal(r.code, 0, r.failures.join("\n"));
+});
+
+test("a heater command is read with no space, a line number or in lower case", () => {
+  for (const line of ["M104S400", "N10 M104 S400", "m104 s400", "M109 S400", "M104 R400"]) {
+    caught(line, /nozzle commanded to 400 °C, over the hardware 280/);
+  }
+  caught("M140S150", /bed commanded to 150 °C, over the hardware 110/);
+  // The firmware splits on letters: S290E-1 is S 290 and E -1, never 29.
+  caught("M104 S290E-1", /nozzle commanded to 290 °C/);
+});
+
+test("a nozzle command over the filament's own range fails, under the hardware cap or not", () => {
+  caught("M104 S270", /over the 235 °C PLA takes/);
+  assert.equal(check(gcode("M104 S170\nG1 X10 Y10 E1\n")).code, 0, "a standby temperature below the range is fine");
+});
+
+test("a move is read with no space, a line number or an exponent the firmware does not read", () => {
+  caught("G1X300Y0F6000", /XY moves leave the bed: X 10\.0\.\.300\.0/);
+  caught("N5 G1 X300 Y0", /XY moves leave the bed/);
+  caught("G1 X300E-1 Y0", /XY moves leave the bed/);
+  caught("G 1 X300", /XY moves leave the bed/);
+  caught("G1X20Y10F60000", /feedrate 1000 mm\/s/);
+});
+
+test("acceleration is read from M204 P and T, and from SET_VELOCITY_LIMIT however it is written", () => {
+  caught("M204 P50000 T50000", /acceleration 50000 over the hardware 20000/);
+  caught("M204 S50000", /acceleration 50000/);
+  caught("SET_VELOCITY_LIMIT ACCEL=5e4", /acceleration 50000/);
+  caught("SET_VELOCITY_LIMIT ACCEL=+50000", /acceleration 50000/);
+  caught("set_velocity_limit accel=50000", /acceleration 50000/);
+  caught("SET_VELOCITY_LIMIT ACCEL_TO_DECEL=50000", /acceleration 50000/);
+  // Two values for one key: the firmware keeps the last, and the check keeps neither.
+  caught("SET_VELOCITY_LIMIT ACCEL=5000 ACCEL=50000", /cannot read the firmware's way.*ACCEL/);
+  caught("SET_VELOCITY_LIMIT ACCEL=\"50000\"", /cannot read the firmware's way.*quoted/);
+});
+
+test("a speed factor multiplies every later feedrate, and a raised speed limit fails", () => {
+  caught("M220 S500\nG1 X30 Y10 F36000", /feedrate 3000 mm\/s over the hardware 600/);
+  caught("SET_VELOCITY_LIMIT VELOCITY=3000", /raises the speed limit to 3000 mm\/s/);
+  assert.equal(check(gcode("M220 S100\nSET_VELOCITY_LIMIT VELOCITY=500 ACCEL=5000\nG1 X30 Y10 F30000\n")).code, 0);
+});
+
+test("a command no 5M slice carries fails, whatever it does", () => {
+  for (const line of [
+    "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=400", "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=150",
+    "PID_CALIBRATE HEATER=extruder TARGET=400", "G28", "M84", "M600", "FORCE_MOVE STEPPER=stepper_x DISTANCE=50",
+    "G18", "M112",
+  ]) caught(line, /no 5M slice carries/);
+});
+
+test("a tool written with a space, or named on a heater command, is still a tool", () => {
+  caught("T 1", /one extruder.*T1/);
+  caught("M104 T1 S200", /one extruder.*T1/);
+});
+
+test("a line the firmware cannot run as written fails rather than being guessed at", () => {
+  caught("G1 Z-5 F600", /Z -5 mm, below the bed/);
+  caught("G2 X30 Y10 R5", /arc written with R/);
+  caught("G91\nG2 X10 Y0 I5 J0", /arc in relative mode/);
+  caught("G2 X30 Y10", /arc with no centre/);
+  caught("G1 X1 0", /X is not one plain number/);
+  caught("G1 X10 X300", /X is not one plain number/);
+  caught("5G1 X300", /text before the command/);
+});
+
+test("the line reader splits a line the way the firmware does", () => {
+  const read = (line: string) => {
+    const c = readCommand(line);
+    return c && { name: c.name, params: Object.fromEntries(c.params), ...(c.malformed ? { malformed: c.malformed } : {}) };
+  };
+  assert.deepEqual(read("G1 X10.5 Y-3 ; travel"), { name: "G1", params: { X: ["10.5"], Y: ["-3"] } });
+  assert.deepEqual(read("M104S290E-1"), { name: "M104", params: { S: ["290"], E: ["-1"] } });
+  assert.deepEqual(read("N12 G1 X5*71"), { name: "G1", params: { X: ["5"], "*": ["71"] } });
+  assert.deepEqual(read("SET_VELOCITY_LIMIT accel=500 # note"), { name: "SET_VELOCITY_LIMIT", params: { ACCEL: ["500"] } });
+  assert.deepEqual(read("EXCLUDE_OBJECT_START NAME=lid_id_0_copy_0"), { name: "EXCLUDE_OBJECT_START", params: { NAME: ["lid_id_0_copy_0"] } });
+  assert.equal(read("PAUSE")?.name, "PAUSE");
+  assert.equal(read("   ; only a comment"), null);
+  assert.equal(read(""), null);
+  assert.match(read("SET_VELOCITY_LIMIT ACCEL")?.malformed ?? "", /not KEY=VALUE/);
 });

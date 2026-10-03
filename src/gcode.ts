@@ -1,9 +1,16 @@
 /**
  * Reading a G-code file the way the printer will read it, and holding it to the machine before it moves.
  *
- * The scan follows the modal state a firmware follows — G90/G91, G92, and G2/G3 arcs by the extremes they sweep
- * through rather than by their endpoints. An endpoint-only reading misses an arc that bulges past the bed edge,
- * and reads a relative move as an absolute one; both were real gaps, both are covered by tests.
+ * Every line is split the way the AD5M's firmware, Klipper, splits it (`_process_commands` and `_get_extended_params`
+ * in klippy/gcode.py, upstream 461c4e3722c3): upper case, a comment cut at `;`, a line number skipped, a traditional
+ * command's parameters split on letters, so `S290E-1` is S 290 and an exponent is never read, and Klipper's own
+ * commands read as KEY=VALUE. A check that splits on spaces and reads exponents passes `M104S400`, `N10 M104 S400`
+ * and `M104 S290E-1` clean.
+ *
+ * A line the check cannot read that way fails, and so does any command a 5M slice never carries: the firmware knows
+ * commands (heaters, homing, steppers, its own macros) that the check does not hold a file to, and a file it cannot
+ * read is not a file it can pass. Moves follow the modal state a firmware follows: G90/G91, G92's offsets, M220's
+ * speed factor, and G2/G3 arcs by the extremes they sweep through rather than by their endpoints.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
@@ -13,20 +20,103 @@ import {
   PRINTER_MODEL, TEMP_RANGE,
 } from "./machine.js";
 
-const PARAM = /([A-Za-z])\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)/g;
+/**
+ * Klipper's split of a line (`args_r`): a run of letters and underscores, or one `*` or `/`. Upstream no longer splits
+ * on `/`; the older split is kept, because it reads a value where the newer one refuses the line.
+ */
+const SPLIT = /([A-Z_]+|[A-Z*/])/;
+/** A traditional command's value: Python's float() on text the letters have already been split from. */
+const NUMBER = /^[-+]?(?:\d+\.?\d*|\.\d+)$/;
+/** An extended command's value keeps its letters, so float() reads an exponent there: ACCEL=5e4 is 50 000. */
+const NUMBER_EXTENDED = /^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$/;
+
+/**
+ * Every command a slice for the AD5M carries, and nothing else. Flash Studio 1.7.15's own slice of a plate for the
+ * AD5M carries sixteen: G0 G1 G2 G3 G17 G21 G90 G92 M73 M83 M104 M106 M109 M140 M190 SET_VELOCITY_LIMIT. The AD5M's
+ * machine preset adds PAUSE (its pause G-code). The rest is what the slicer writes for a Klipper printer when a
+ * process or filament preset turns a feature on (src/libslic3r/GCodeWriter.cpp and GCode.cpp): relative moves and
+ * extrusion, dwell, the fan off, acceleration by M204, the speed and flow factors, pressure advance, object labels,
+ * the one extruder. G28, M84, M600, timelapse and every heater command but the four below are not here.
+ */
+export const KNOWN_COMMANDS: ReadonlySet<string> = new Set([
+  "G0", "G1", "G2", "G3", "G4", "G17", "G21", "G90", "G91", "G92", "M82", "M83", "M400",
+  "M104", "M109", "M140", "M190",
+  "M73", "M106", "M107", "M117",
+  "M204", "M220", "M221", "SET_VELOCITY_LIMIT", "SET_PRESSURE_ADVANCE",
+  "PAUSE", "EXCLUDE_OBJECT_DEFINE", "EXCLUDE_OBJECT_START", "EXCLUDE_OBJECT_END",
+]);
 
 /**
  * Commands that change what the printer believes about itself rather than moving it: the Z offset, the position it
- * thinks it is at, its saved configuration. The AD5M's own start block uses SET_PRESSURE_ADVANCE and
- * SET_VELOCITY_LIMIT, which only set print parameters, so those are not here. Checked against a sliced file: a clean
- * AD5M G-code carries none of these, and its one G92 is G92 E0.
+ * thinks it is at, its saved configuration. Told by name; G92 on X, Y or Z is told with them. Checked against a
+ * sliced file: a clean AD5M G-code carries none of these, and its one G92 is G92 E0.
  */
-const STATE_COMMANDS = /^\s*(SET_GCODE_OFFSET|SET_KINEMATIC_POSITION|SET_HOME_OFFSET|SAVE_CONFIG|FIRMWARE_RESTART|RESTART|M500|M502)\b/i;
+const STATE_COMMANDS: ReadonlySet<string> = new Set([
+  "SET_GCODE_OFFSET", "SET_KINEMATIC_POSITION", "SET_HOME_OFFSET", "SAVE_CONFIG", "FIRMWARE_RESTART", "RESTART",
+  "M500", "M502",
+]);
+
+/** One line as the 5M's firmware dispatches it. */
+export interface Command {
+  /** What the firmware looks the line up by: G1, M104, T0, SET_VELOCITY_LIMIT. Empty when nothing names one. */
+  name: string;
+  /** One of Klipper's own commands, whose parameters are KEY=VALUE, rather than a letter and a number. */
+  extended: boolean;
+  /** Each parameter's text, every time the line names it. The firmware keeps the last; the check refuses two. */
+  params: Map<string, string[]>;
+  /** Why the line cannot be read the firmware's way, when it cannot. */
+  malformed?: string;
+}
+
+/**
+ * One line, split the way Klipper splits it; null for a blank line or a comment. Where two Klipper releases read a
+ * line differently, the reading that moves the machine is taken: older releases drop the space in `T 1` and `G 1`,
+ * and run them as T1 and G1.
+ */
+export function readCommand(raw: string): Command | null {
+  const line = raw.trim();
+  const cut = line.indexOf(";");
+  const code = (cut >= 0 ? line.slice(0, cut) : line).trim();
+  if (!code) return null;
+  const parts = code.toUpperCase().split(SPLIT);
+  const params = new Map<string, string[]>();
+  if ((parts[0] ?? "").trim()) return { name: "", extended: false, params, malformed: "text before the command" };
+  // A line number goes first and is skipped, the way the firmware skips it.
+  const at = parts[1] === "N" && /^\s*\d+\s*$/.test(parts[2] ?? "") ? 3 : 1;
+  const word = parts[at] ?? "";
+  const name = word + (parts[at + 1] ?? "").trim();
+  const extended = word.length > 1;
+  if (!extended) {
+    for (let k = at + 2; k < parts.length; k += 2) {
+      const key = parts[k] ?? "";
+      params.set(key, [...(params.get(key) ?? []), (parts[k + 1] ?? "").trim()]);
+    }
+    return { name, extended, params };
+  }
+  // Klipper's own commands: the text after the name, split on white space with `#` and `;` ending it, each piece
+  // KEY=VALUE. Quoting there is shell quoting, and a quoted value is not one this reads.
+  let rest = line.slice(line.toUpperCase().indexOf(name) + name.length);
+  if (at === 3) rest = rest.replace(/\*\d+\s*$/, "");
+  const end = rest.search(/[#;]/);
+  if (end >= 0) rest = rest.slice(0, end);
+  if (/["'\\]/.test(rest)) return { name, extended, params, malformed: "a quoted value" };
+  for (const piece of rest.trim().split(/\s+/).filter(Boolean)) {
+    const eq = piece.indexOf("=");
+    if (eq <= 0) return { name, extended, params, malformed: `'${piece}' is not KEY=VALUE, and the firmware refuses the line` };
+    const key = piece.slice(0, eq).toUpperCase();
+    params.set(key, [...(params.get(key) ?? []), piece.slice(eq + 1)]);
+  }
+  return { name, extended, params };
+}
 
 /** The '; key = value' block a slicer writes, plus its totals lines. Stops at the end of the config block. */
 export function header(path: string): Map<string, string> {
+  return headerOf(readFileSync(path, "utf8"));
+}
+
+function headerOf(text: string): Map<string, string> {
   const h = new Map<string, string>();
-  for (const line of readFileSync(path, "utf8").split("\n")) {
+  for (const line of text.split("\n")) {
     if (!line.startsWith("; ")) continue;
     const body = line.slice(2).replace(/\r$/, "");
     if (body.startsWith("generated by ")) {
@@ -57,30 +147,42 @@ export function firstValue(value: string | undefined): string {
   return slotValue(value, 0);
 }
 
+/** A line of the file, by number, with its text cut short for a report. */
+export interface At { line: number; text: string; }
+
 export interface Scan {
-  bambuHits: Array<{ line: number; text: string }>;
+  bambuHits: At[];
   maxZ: number | null;
+  /** The lowest Z a move goes to. Below 0 the nozzle is in the bed. */
+  minZ: number | null;
   x: [number, number] | [null, null];
   y: [number, number] | [null, null];
   hasNozzleHeat: boolean;
   hasBedHeat: boolean;
   arcs: number;
   relativeMoves: number;
-  /** The highest the file asks for, whatever its header claims. */
+  /** The highest the file asks for, whatever its header claims: F times M220's factor. */
   maxFeedXY: number;
   maxFeedZOnly: number;
+  /** M204's S, P and T, and SET_VELOCITY_LIMIT's ACCEL and ACCEL_TO_DECEL: the highest of any. */
   maxAccel: number;
+  /** SET_VELOCITY_LIMIT VELOCITY: the speed limit the file sets the machine to. */
+  maxVelocityLimit: number;
   maxNozzleC: number;
   maxBedC: number;
   layers: number;
-  /** Every T command, in order. The 5M has one extruder: anything but T0 is a change it cannot make. */
+  /** Every T command, and every heater command aimed at a tool, in order. The 5M has one extruder: T0. */
   tools: Array<{ line: number; tool: number }>;
   /** The line "; EXECUTABLE_BLOCK_START" sits on, when the file has one. */
   executableStart: number | null;
   /** Commands before that marker. In a file the slicer wrote there are none: the first is the line after it. */
-  beforeStart: Array<{ line: number; text: string }>;
+  beforeStart: At[];
   /** Commands that move the printer's own idea of where it is, or rewrite its configuration. */
-  stateCommands: Array<{ line: number; text: string }>;
+  stateCommands: At[];
+  /** Commands no 5M slice carries (KNOWN_COMMANDS). */
+  unknown: At[];
+  /** Lines the check cannot read the firmware's way, or that the firmware refuses: each says why. */
+  unreadable: At[];
 }
 
 /** Every point an arc can reach: its end, plus each axis extreme the sweep passes through. */
@@ -109,23 +211,31 @@ export function arcPoints(
   return points;
 }
 
-function params(rest: string): Map<string, number> {
-  const out = new Map<string, number>();
-  PARAM.lastIndex = 0;
-  for (let m = PARAM.exec(rest); m; m = PARAM.exec(rest)) {
-    out.set((m[1] ?? "").toUpperCase(), Number.parseFloat(m[2] ?? "0"));
-  }
-  return out;
+/**
+ * A parameter as a number, the way the firmware reads it: undefined when the line does not name it, NaN when the
+ * text is not one plain number or the line names it twice. The firmware keeps the last of two; the check keeps
+ * neither and fails the line.
+ */
+export function numberParam(cmd: Command, key: string): number | undefined {
+  const values = cmd.params.get(key);
+  if (!values) return undefined;
+  const text = values[values.length - 1] ?? "";
+  return values.length === 1 && (cmd.extended ? NUMBER_EXTENDED : NUMBER).test(text) ? Number(text) : Number.NaN;
 }
+
+const short = (raw: string) => raw.trim().slice(0, 60);
 
 /** One pass over the whole file. Everything the check needs, measured rather than believed. */
 export function scan(path: string): Scan {
+  return scanOf(readFileSync(path, "utf8"));
+}
+
+function scanOf(text: string): Scan {
   const s: Scan = {
-    bambuHits: [], maxZ: null, x: [null, null], y: [null, null],
+    bambuHits: [], maxZ: null, minZ: null, x: [null, null], y: [null, null],
     hasNozzleHeat: false, hasBedHeat: false, arcs: 0, relativeMoves: 0,
-    maxFeedXY: 0, maxFeedZOnly: 0, maxAccel: 0, maxNozzleC: 0, maxBedC: 0, layers: 0, tools: [],
-  
-    executableStart: null, beforeStart: [], stateCommands: [],
+    maxFeedXY: 0, maxFeedZOnly: 0, maxAccel: 0, maxVelocityLimit: 0, maxNozzleC: 0, maxBedC: 0, layers: 0, tools: [],
+    executableStart: null, beforeStart: [], stateCommands: [], unknown: [], unreadable: [],
   };
   let minX: number | null = null, maxX: number | null = null, minY: number | null = null, maxY: number | null = null;
   const see = (x: number, y: number) => {
@@ -135,88 +245,113 @@ export function scan(path: string): Scan {
     maxY = maxY === null || y > maxY ? y : maxY;
   };
 
-  let px = 0, py = 0, pz = 0, feed = 0;
+  // Where the head is on the machine, and G92's offset from there to the coordinates the file writes.
+  let px = 0, py = 0, pz = 0, bx = 0, by = 0, bz = 0;
+  let feed = 0, speedFactor = 1;
   let absolute = true;
   let lineNo = 0;
 
-  for (const raw of readFileSync(path, "utf8").split("\n")) {
+  for (const raw of text.split("\n")) {
     lineNo++;
     if (raw.startsWith(";")) {
       if (raw.startsWith(";LAYER_CHANGE")) s.layers++;
       if (s.executableStart === null && raw.includes("EXECUTABLE_BLOCK_START")) s.executableStart = lineNo;
       continue;
     }
-    if (s.executableStart === null && raw.trim()) s.beforeStart.push({ line: lineNo, text: raw.trim().slice(0, 60) });
-    if (STATE_COMMANDS.test(raw)) s.stateCommands.push({ line: lineNo, text: raw.trim().slice(0, 60) });
-    if (raw.startsWith("M104") || raw.startsWith("M109")) s.hasNozzleHeat = true;
-    if (raw.startsWith("M140") || raw.startsWith("M190")) s.hasBedHeat = true;
-    for (const marker of BAMBU_MARKERS) {
-      if (marker.test(raw)) {
-        s.bambuHits.push({ line: lineNo, text: raw.trim().slice(0, 60) });
-        break;
-      }
-    }
-    const code = (raw.split(";", 1)[0] ?? "").trim();
-    if (!code) continue;
-    const word = (code.split(/\s+/, 1)[0] ?? "").toUpperCase();
+    const cmd = readCommand(raw);
+    if (!cmd) continue;
+    const at: At = { line: lineNo, text: short(raw) };
+    if (s.executableStart === null) s.beforeStart.push(at);
+    if (BAMBU_MARKERS.some((marker) => marker.test(raw.trim()))) { s.bambuHits.push(at); continue; }
+    const why = (reason: string) => s.unreadable.push({ line: lineNo, text: `${short(raw)} (${reason})` });
+    if (cmd.malformed) { why(cmd.malformed); continue; }
+    const { name } = cmd;
+    if (STATE_COMMANDS.has(name)) { s.stateCommands.push(at); continue; }
 
-    const tool = /^T(\d+)$/.exec(word);
+    const tool = /^T(\d+)$/.exec(name);
     if (tool) { s.tools.push({ line: lineNo, tool: Number(tool[1]) }); continue; }
-    if (word === "G90") { absolute = true; continue; }
-    if (word === "G91") { absolute = false; continue; }
+    if (!KNOWN_COMMANDS.has(name)) { s.unknown.push(at); continue; }
 
-    if (word === "M104" || word === "M109" || word === "M140" || word === "M190") {
-      const value = params(code.slice(word.length)).get("S");
-      if (value !== undefined) {
-        if (word === "M104" || word === "M109") s.maxNozzleC = Math.max(s.maxNozzleC, value);
-        else s.maxBedC = Math.max(s.maxBedC, value);
-      }
-      continue;
-    }
-    if (word === "M204") {
-      const value = params(code.slice(word.length)).get("S");
-      if (value !== undefined) s.maxAccel = Math.max(s.maxAccel, value);
-      continue;
-    }
-    if (word === "SET_VELOCITY_LIMIT") {
-      const accel = /ACCEL=([\d.]+)/i.exec(code);
-      if (accel) s.maxAccel = Math.max(s.maxAccel, Number.parseFloat(accel[1] ?? "0"));
-      continue;
-    }
-    if (word !== "G0" && word !== "G1" && word !== "G2" && word !== "G3" && word !== "G92") continue;
+    // Every parameter this reads is one plain number; anything else fails the line rather than being guessed at.
+    const read = (key: string): number | undefined => {
+      const value = numberParam(cmd, key);
+      if (value !== undefined && Number.isNaN(value)) why(`${key} is not one plain number`);
+      return value === undefined || Number.isNaN(value) ? undefined : value;
+    };
+    const most = (...values: Array<number | undefined>) => Math.max(0, ...values.filter((v): v is number => v !== undefined));
 
-    const p = params(code.slice(word.length));
-    if (word === "G92") {
-      // G92 E0 resets the extruder and is ordinary. G92 on X, Y or Z moves the machine's own idea of where it is.
-      if (p.has("X") || p.has("Y") || p.has("Z")) s.stateCommands.push({ line: lineNo, text: code.slice(0, 60) });
-      if (p.has("X")) px = p.get("X") ?? px;
-      if (p.has("Y")) py = p.get("Y") ?? py;
-      if (p.has("Z")) pz = p.get("Z") ?? pz;
+    if (name === "G90") { absolute = true; continue; }
+    if (name === "G91") { absolute = false; continue; }
+
+    if (name === "M104" || name === "M109") {
+      s.hasNozzleHeat = true;
+      s.maxNozzleC = Math.max(s.maxNozzleC, most(read("S"), read("R")));
+      const index = read("T");
+      if (index !== undefined) s.tools.push({ line: lineNo, tool: index });
       continue;
     }
-    const f = p.get("F");
-    if (f !== undefined) feed = f;
-    const tx = p.has("X") ? (absolute ? (p.get("X") ?? px) : px + (p.get("X") ?? 0)) : px;
-    const ty = p.has("Y") ? (absolute ? (p.get("Y") ?? py) : py + (p.get("Y") ?? 0)) : py;
-    const tz = p.has("Z") ? (absolute ? (p.get("Z") ?? pz) : pz + (p.get("Z") ?? 0)) : pz;
-    if (!absolute && (p.has("X") || p.has("Y") || p.has("Z"))) s.relativeMoves++;
+    if (name === "M140" || name === "M190") {
+      s.hasBedHeat = true;
+      s.maxBedC = Math.max(s.maxBedC, most(read("S"), read("R")));
+      continue;
+    }
+    if (name === "M204") { s.maxAccel = Math.max(s.maxAccel, most(read("S"), read("P"), read("T"))); continue; }
+    if (name === "SET_VELOCITY_LIMIT") {
+      s.maxAccel = Math.max(s.maxAccel, most(read("ACCEL"), read("ACCEL_TO_DECEL")));
+      s.maxVelocityLimit = Math.max(s.maxVelocityLimit, most(read("VELOCITY")));
+      read("SQUARE_CORNER_VELOCITY");
+      read("MINIMUM_CRUISE_RATIO");
+      continue;
+    }
+    if (name === "M220") {
+      // The firmware multiplies every later feedrate by it: M220 S500 makes F36000 a 3000 mm/s move.
+      const percent = read("S") ?? 100;
+      if (percent > 0) speedFactor = percent / 100;
+      else why("M220 S must be above 0");
+      continue;
+    }
+    if (name !== "G0" && name !== "G1" && name !== "G2" && name !== "G3" && name !== "G92") continue;
 
-    const hasXY = p.has("X") || p.has("Y");
-    if (word === "G2" || word === "G3") {
+    const X = read("X"), Y = read("Y"), Z = read("Z");
+    if (name === "G92") {
+      // G92 E0 resets the extruder and is ordinary. G92 on X, Y or Z, or bare, moves the machine's idea of where it is.
+      const E = read("E");
+      if (X !== undefined || Y !== undefined || Z !== undefined || E === undefined) s.stateCommands.push(at);
+      const bare = X === undefined && Y === undefined && Z === undefined && E === undefined;
+      if (X !== undefined || bare) bx = px - (X ?? 0);
+      if (Y !== undefined || bare) by = py - (Y ?? 0);
+      if (Z !== undefined || bare) bz = pz - (Z ?? 0);
+      continue;
+    }
+    read("E");
+    const F = read("F");
+    if (F !== undefined) feed = F;
+    const tx = X === undefined ? px : absolute ? X + bx : px + X;
+    const ty = Y === undefined ? py : absolute ? Y + by : py + Y;
+    const tz = Z === undefined ? pz : absolute ? Z + bz : pz + Z;
+    if (!absolute && (X !== undefined || Y !== undefined || Z !== undefined)) s.relativeMoves++;
+
+    const speed = (feed / 60) * speedFactor;
+    if (name === "G2" || name === "G3") {
       s.arcs++;
-      if (p.has("I") || p.has("J")) {
-        for (const [ax, ay] of arcPoints(px, py, tx, ty, p.get("I") ?? 0, p.get("J") ?? 0, word === "G2")) see(ax, ay);
-      } else {
-        see(tx, ty);
-      }
-      s.maxFeedXY = Math.max(s.maxFeedXY, feed / 60);
-    } else if (hasXY) {
+      const I = read("I") ?? 0, J = read("J") ?? 0;
+      // The firmware refuses all three and the print stops there (klippy/extras/gcode_arcs.py).
+      if (cmd.params.has("R")) why("an arc written with R, which the firmware refuses");
+      else if (!absolute) why("an arc in relative mode, which the firmware refuses");
+      else if (!I && !J) why("an arc with no centre, which the firmware refuses");
+      else for (const [ax, ay] of arcPoints(px, py, tx, ty, I, J, name === "G2")) see(ax, ay);
       see(tx, ty);
-      s.maxFeedXY = Math.max(s.maxFeedXY, feed / 60);
-    } else if (p.has("Z")) {
-      s.maxFeedZOnly = Math.max(s.maxFeedZOnly, feed / 60);
+      s.maxFeedXY = Math.max(s.maxFeedXY, speed);
+    } else if (X !== undefined || Y !== undefined) {
+      see(tx, ty);
+      s.maxFeedXY = Math.max(s.maxFeedXY, speed);
+    } else if (Z !== undefined) {
+      s.maxFeedZOnly = Math.max(s.maxFeedZOnly, speed);
     }
-    if (p.has("Z")) s.maxZ = s.maxZ === null || tz > s.maxZ ? tz : s.maxZ;
+    if (Z !== undefined) {
+      s.maxZ = s.maxZ === null || tz > s.maxZ ? tz : s.maxZ;
+      s.minZ = s.minZ === null || tz < s.minZ ? tz : s.minZ;
+    }
     px = tx; py = ty; pz = tz;
   }
 
@@ -281,6 +416,10 @@ const BRIDGE = /^bridge( infill)?$/i;
  * along it — and crosses air everywhere else. One entry per object and layer, the longest first.
  */
 export function openBridges(path: string, objects: PlateObject[] = []): OpenBridge[] {
+  return openBridgesOf(readFileSync(path, "utf8"), objects);
+}
+
+function openBridgesOf(text: string, objects: PlateObject[]): OpenBridge[] {
   const below: Array<{ z: number; cells: Set<number> }> = [];
   let cells = new Set<number>();
   let z = 0;
@@ -362,7 +501,7 @@ export function openBridges(path: string, objects: PlateObject[] = []): OpenBrid
     while (below.length && (below[0]?.z ?? 0) < z - 2 * HOLD_BELOW) below.shift();
   };
 
-  for (const raw of readFileSync(path, "utf8").split("\n")) {
+  for (const raw of text.split("\n")) {
     if (raw.startsWith(";")) {
       if (raw.startsWith(";LAYER_CHANGE") || raw.startsWith("; CHANGE_LAYER")) endLayer();
       const height = /^;\s*(?:Z:|Z_HEIGHT:)\s*([-\d.]+)/.exec(raw);
@@ -371,28 +510,34 @@ export function openBridges(path: string, objects: PlateObject[] = []): OpenBrid
       if (feature) type = feature[1] ?? "";
       continue;
     }
-    const code = (raw.split(";", 1)[0] ?? "").trim();
-    if (!code) continue;
-    const word = (code.split(/\s+/, 1)[0] ?? "").toUpperCase();
+    // Read the way the scan reads a line; a value it cannot read is the scan's failure, and is skipped here.
+    const cmd = readCommand(raw);
+    if (!cmd || cmd.malformed) continue;
+    const word = cmd.name;
     if (word === "G90") { absolute = true; continue; }
     if (word === "G91") { absolute = false; continue; }
     if (word === "M82") { relativeE = false; continue; }
     if (word === "M83") { relativeE = true; continue; }
     if (word !== "G0" && word !== "G1" && word !== "G2" && word !== "G3" && word !== "G92") continue;
-    const p = params(code.slice(word.length));
+    const get = (key: string) => {
+      const value = numberParam(cmd, key);
+      return value === undefined || Number.isNaN(value) ? undefined : value;
+    };
     if (word === "G92") {
-      if (p.has("E")) pe = p.get("E") ?? 0;
+      const e = get("E");
+      if (e !== undefined) pe = e;
       continue;
     }
-    const tx = p.has("X") ? (absolute ? (p.get("X") ?? px) : px + (p.get("X") ?? 0)) : px;
-    const ty = p.has("Y") ? (absolute ? (p.get("Y") ?? py) : py + (p.get("Y") ?? 0)) : py;
-    const e = p.get("E");
+    const X = get("X"), Y = get("Y"), I = get("I"), J = get("J");
+    const tx = X === undefined ? px : absolute ? X : px + X;
+    const ty = Y === undefined ? py : absolute ? Y : py + Y;
+    const e = get("E");
     const extrudes = e !== undefined && (relativeE ? e > 0 : e > pe);
     if (e !== undefined && !relativeE) pe = e;
-    const curved = (word === "G2" || word === "G3") && (p.has("I") || p.has("J"));
+    const curved = (word === "G2" || word === "G3") && (I !== undefined || J !== undefined);
     if (extrudes && (curved || tx !== px || ty !== py)) {
       const along = curved
-        ? arc(px, py, tx, ty, p.get("I") ?? 0, p.get("J") ?? 0, word === "G2")
+        ? arc(px, py, tx, ty, I ?? 0, J ?? 0, word === "G2")
         : line(px, py, tx, ty);
       if (BRIDGE.test(type)) strand(along);
       for (const [x, y] of along) cells.add(keyOf(cellOf(x), cellOf(y)));
@@ -428,8 +573,9 @@ export interface CheckResult {
  * them the plate_N.json beside the file is read, and without that the bridge is placed by X and Y.
  */
 export function check(path: string, objects?: PlateObject[]): CheckResult {
-  const h = header(path);
-  const s = scan(path);
+  const text = readFileSync(path, "utf8");
+  const h = headerOf(text);
+  const s = scanOf(text);
   const lines: CheckLine[] = [];
   const failures: string[] = [];
   const warnings: string[] = [];
@@ -456,6 +602,14 @@ export function check(path: string, objects?: PlateObject[]): CheckResult {
   const first = s.bambuHits[0];
   verdict(s.bambuHits.length === 0, "no Bambu-only commands",
     `${s.bambuHits.length} Bambu-only command(s), first at line ${first?.line ?? 0}: ${first?.text ?? ""}`);
+
+  const unknown = s.unknown[0];
+  verdict(!s.unknown.length, "every command is one a 5M slice carries",
+    `${s.unknown.length} command(s) no 5M slice carries, first at line ${unknown?.line ?? 0}: ${unknown?.text ?? ""}`
+    + ` — the firmware would run what the check does not hold to the machine`);
+  const unread = s.unreadable[0];
+  verdict(!s.unreadable.length, "every line reads the way the firmware reads it",
+    `${s.unreadable.length} line(s) the check cannot read the firmware's way, first at line ${unread?.line ?? 0}: ${unread?.text ?? ""}`);
 
   // Which slots the plate draws from: the header lists one length per slot, and a Bambu project may print from slot 10.
   const perSlot = (h.get("filament used [mm]") ?? "0").split(/[;,]/).map((v) => Number.parseFloat(v.trim()));
@@ -486,6 +640,7 @@ export function check(path: string, objects?: PlateObject[]): CheckResult {
     `${s.stateCommands.length} command(s) change the printer's own state — first at line ${state?.line ?? 0}: ${state?.text ?? ""}`);
 
   verdict(s.maxZ !== null && s.maxZ <= BED_Z, `max Z ${s.maxZ} mm`, `max Z ${s.maxZ} exceeds ${BED_Z} mm`);
+  verdict(s.minZ === null || s.minZ >= 0, `lowest Z ${s.minZ ?? 0} mm`, `a move goes to Z ${s.minZ} mm, below the bed`);
 
   if (s.x[0] !== null && s.y[0] !== null) {
     const [x0, x1] = s.x as [number, number];
@@ -530,10 +685,20 @@ export function check(path: string, objects?: PlateObject[]): CheckResult {
 
   verdict(s.maxNozzleC <= HW.nozzleMaxC, `highest nozzle command ${s.maxNozzleC.toFixed(0)} °C ≤ hardware ${HW.nozzleMaxC}`,
     `nozzle commanded to ${s.maxNozzleC.toFixed(0)} °C, over the hardware ${HW.nozzleMaxC}`);
+  // The bed command has to equal the preset (below); the nozzle may sit lower, to preheat or to stand by, never higher
+  // than the filament takes. A PLA file commanding 270 °C is under the hardware cap and still wrong.
+  if (range) {
+    const nHi = range.nozzle[1];
+    verdict(s.maxNozzleC <= nHi, `highest nozzle command ${s.maxNozzleC.toFixed(0)} °C within ${filamentType}'s ${nHi}`,
+      `nozzle commanded to ${s.maxNozzleC.toFixed(0)} °C, over the ${nHi} °C ${filamentType} takes`);
+  }
   verdict(s.maxBedC <= HW.bedMaxC, `highest bed command ${s.maxBedC.toFixed(0)} °C ≤ hardware ${HW.bedMaxC}`,
     `bed commanded to ${s.maxBedC.toFixed(0)} °C, over the hardware ${HW.bedMaxC}`);
   verdict(s.maxFeedXY <= HW.maxSpeedMmS, `highest XY feedrate ${s.maxFeedXY.toFixed(0)} mm/s ≤ hardware ${HW.maxSpeedMmS}`,
     `feedrate ${s.maxFeedXY.toFixed(0)} mm/s over the hardware ${HW.maxSpeedMmS}`);
+  verdict(s.maxVelocityLimit <= HW.maxSpeedMmS,
+    s.maxVelocityLimit ? `speed limit set to ${s.maxVelocityLimit.toFixed(0)} mm/s ≤ hardware ${HW.maxSpeedMmS}` : "the speed limit is the machine's own",
+    `SET_VELOCITY_LIMIT raises the speed limit to ${s.maxVelocityLimit.toFixed(0)} mm/s, over the hardware ${HW.maxSpeedMmS}`);
   lines.push({
     state: "ok",
     text: `Z-only moves carry up to ${s.maxFeedZOnly.toFixed(0)} mm/s; Klipper clamps Z to its max_z_velocity (${HW.maxZSpeedMmS} on the 5M) itself`,
@@ -562,7 +727,7 @@ export function check(path: string, objects?: PlateObject[]): CheckResult {
   }
 
   // A bridge over air longer than the slicer's own limit is told, never failed: the part may still come out right.
-  const bridges = openBridges(path, objects ?? besideObjects(path));
+  const bridges = openBridgesOf(text, objects ?? besideObjects(path));
   const long = new Map<string, OpenBridge[]>();
   for (const b of bridges) {
     if (b.span <= BRIDGE_UNSUPPORTED_MM) continue;
