@@ -187,8 +187,13 @@ export interface Collapse {
   moved: string[];
   /** Tool and colour changes taken out of the layer list. */
   dropped: string[];
-  /** Pauses and custom G-code left in place. */
+  /** Pauses left in place: the slicer writes the 5M's own pause G-code there, not the project's. */
   kept: string[];
+  /**
+   * The designer's own G-code at a layer, which the slicer writes into the print as it stands (GCode.cpp, the `extra`
+   * of a Custom item). Taken out unless --keep-custom-gcode keeps it; kept, the check reads it like any other line.
+   */
+  custom: Array<{ at: string; text: string; kept: boolean }>;
 }
 
 const EXTRUDER = /(<metadata key="extruder" value=")(\d+)("\s*\/>)/g;
@@ -208,8 +213,8 @@ function attr(tag: string, name: string): string {
  * every tool or colour change comes out of the layer list — a pause at a layer is for the person printing to add.
  * Painted colour regions live in the mesh and are not touched here; the check fails a file that still has them.
  */
-export function collapseFilaments(zip: Zip): Collapse {
-  const out: Collapse = { members: {}, moved: [], dropped: [], kept: [] };
+export function collapseFilaments(zip: Zip, keepCustom = false): Collapse {
+  const out: Collapse = { members: {}, moved: [], dropped: [], kept: [], custom: [] };
 
   const xml = modelSettings(zip);
   if (xml) {
@@ -233,7 +238,12 @@ export function collapseFilaments(zip: Zip): Collapse {
   if (zip.has(layersName)) {
     const layers = zip.readText(layersName);
     const next = layers.replace(/[ \t]*<layer\b[^>]*\/>[ \t]*\r?\n?/g, (tag: string) => {
-      const type = attr(tag, "type");
+      // A list from PrusaSlicer 2.2 or older has no type: the slicer reads one from its G-code, and anything but a
+      // colour change, a pause or a tool change is the designer's own text (bbs_3mf.cpp).
+      const typed = /\btype\s*=/.test(tag);
+      const old = attr(tag, "gcode");
+      const type = typed ? attr(tag, "type")
+        : old === "M600" ? "0" : old === "M601" ? "1" : old === "tool_change" ? "2" : "4";
       const kind = LAYER_KIND[type] ?? (attr(tag, "gcode") || `type ${type}`);
       const z = Number.parseFloat(attr(tag, "top_z"));
       const where = Number.isFinite(z) ? `at ${z.toFixed(2)} mm` : "at an unknown height";
@@ -242,6 +252,11 @@ export function collapseFilaments(zip: Zip): Collapse {
         const colour = attr(tag, "color");
         out.dropped.push(`${kind}${slot ? ` to slot ${slot}` : ""}${colour ? ` (${colour})` : ""} ${where}`);
         return "";
+      }
+      if (type === "4") {
+        const text = unescapeOnce(typed ? attr(tag, "extra") : old);
+        out.custom.push({ at: where, text, kept: keepCustom });
+        return keepCustom ? tag : "";
       }
       out.kept.push(`${kind} ${where}`);
       return tag;

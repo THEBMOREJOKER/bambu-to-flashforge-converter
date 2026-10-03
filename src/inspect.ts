@@ -147,6 +147,10 @@ export async function inspect(path: string): Promise<Inspection> {
       warnings.push(`the designer's ${d} — convert takes it out; a pause there instead is your call`);
     }
     for (const k of collapse.kept) warnings.push(`the project's ${k} stays in the print`);
+    for (const c of collapse.custom) {
+      warnings.push(`the designer's own G-code ${c.at}, which convert takes out (--keep-custom-gcode keeps it): `
+        + c.text.replace(/\r?\n/g, " ⏎ ").slice(0, 300));
+    }
 
     const project = settings
       ? {

@@ -3,11 +3,11 @@
  */
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { convert, plateWarningsOf, runCli, type SlicerReport } from "../src/convert.js";
+import { convert, plateWarningsOf, runCli, type SlicerReport, staleOutputs } from "../src/convert.js";
 import { APPIMAGE, MACHINE_JSON } from "../src/machine.js";
 import { withZip } from "../src/zip.js";
 import { writeZip } from "../src/zipwrite.js";
@@ -149,4 +149,38 @@ test("each plate's warning in result.json is read, one line each", () => {
   assert.deepEqual(plateWarningsOf({ sliced_plates: [{ id: 1, warning_message: "" }, { id: 2, warning_message: "Object can't be printed\nObject: a.stl" }] }),
     ["plate 2: Object can't be printed — Object: a.stl"]);
   assert.deepEqual(plateWarningsOf({}), []);
+});
+
+test("an earlier file of the same job is found by its exact name, and no other file is", () => {
+  const out = mkdtempSync(join(tmpdir(), "b2f-test-"));
+  try {
+    const job = "model+v2+-+1+color";
+    for (const f of [`${job}-ad5m.3mf`, `pt1-${job}-ad5m.3mf`, `pt2-${job}-ad5m.3mf`, `pt3-${job}-ad5m.3mf`,
+      `${job}x-ad5m.3mf`, "other-ad5m.3mf", `${job}.3mf`]) writeFileSync(join(out, f), "");
+    // The job is now two plates: the single file and a third plate's file are what an earlier run left.
+    assert.deepEqual(staleOutputs(out, job, [join(out, `pt1-${job}-ad5m.3mf`), join(out, `pt2-${job}-ad5m.3mf`)]).map((f) => basename(f)),
+      [`${job}-ad5m.3mf`, `pt3-${job}-ad5m.3mf`]);
+    // The job is now one file: every pt-file of it is an earlier run's.
+    assert.deepEqual(staleOutputs(out, job, [join(out, `${job}-ad5m.3mf`)]).map((f) => basename(f)),
+      [`pt1-${job}-ad5m.3mf`, `pt2-${job}-ad5m.3mf`, `pt3-${job}-ad5m.3mf`]);
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+});
+
+const FACETS = "facet normal 0 0 1\n  outer loop\n    vertex 0 0 0\n    vertex 10 0 0\n    vertex 0 10 0\n  endloop\nendfacet\n";
+
+test("convert refuses a name that is not a plain file name", { skip: !existsSync(APPIMAGE) || !existsSync(MACHINE_JSON) }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "b2f-test-"));
+  try {
+    const stl = join(dir, "cube.stl");
+    writeFileSync(stl, `solid cube\n${FACETS.repeat(4)}endsolid\n`);
+    for (const name of ["../../Desktop/note", "a/b", ".."]) {
+      const r = await convert({ inputs: [stl], name, out: dir });
+      assert.equal(r.delivered, false, name);
+      assert.match(r.advice ?? "", /plain file name/, name);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

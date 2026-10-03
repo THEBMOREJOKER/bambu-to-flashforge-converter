@@ -52,9 +52,12 @@ function vendorRootOf(path: string): string {
   return rel.startsWith("..") ? dirname(dirname(path)) : join(SYSTEM, rel.split("/")[0] ?? "");
 }
 
-/** A preset by the name Flash Studio shows: Flashforge's own first, then the filament library's. */
+/**
+ * A preset by the name Flash Studio shows: Flashforge's own first, then the filament library's. A name only: until
+ * 2026-10-03 a path was taken as well, so any JSON file on disk could stand in as the filament.
+ */
 export function findPreset(kind: PresetKind, name: string): string | null {
-  if (name.startsWith("/")) return existsSync(name) ? name : null;
+  if (name.includes("/") || name.includes("\\")) return null;
   const bare = name.replace(/\.json$/, "");
   for (const root of kind === "filament" ? [PROFILES, LIBRARY] : [PROFILES]) {
     const found = presetPath(root, kind, bare, vendorIndex(root, kind));
@@ -202,6 +205,35 @@ export function restorePreset(flatPath: string, preset: Preset, keys: readonly s
 }
 
 /**
+ * Settings about the part that are not on the model-facing list: how its shells, infill, surfaces and skin are laid
+ * down, a skirt, ironing's pattern. Each exists on the 5M's process preset.
+ */
+const PART_KEYS: ReadonlySet<string> = new Set([
+  "top_shell_thickness", "bottom_shell_thickness", "top_surface_pattern", "bottom_surface_pattern",
+  "internal_solid_infill_pattern", "infill_direction", "sparse_infill_anchor", "sparse_infill_anchor_max",
+  "infill_combination", "infill_wall_overlap", "minimum_sparse_infill_area", "only_one_wall_top",
+  "only_one_wall_first_layer", "wall_sequence", "is_infill_first", "ensure_vertical_shell_thickness", "interface_shells",
+  "fuzzy_skin", "fuzzy_skin_thickness", "fuzzy_skin_point_distance", "ironing_pattern", "ironing_spacing",
+  "skirt_loops", "skirt_distance", "skirt_height", "draft_shield", "bridge_angle", "thick_bridges",
+  "precise_outer_wall", "slice_closing_radius",
+]);
+
+/**
+ * Whether `--set` or `--object-set` may change a key: the model-facing settings the 5M's preset does not keep, every
+ * support setting the designer's own may carry, and the part's other settings above. Nothing else (since 2026-10-03:
+ * a denylist let 91 of the process preset's 124 keys through, `post_process` among them, a command Flash Studio's
+ * window runs on every export, and `filename_format`).
+ */
+export function settable(key: string): boolean {
+  if (PRESET_ONLY.test(key) || PRINTER_KEEPS.has(key)) return false;
+  return (MODEL_FACING as readonly string[]).includes(key) || PART_KEYS.has(key)
+    || (SUPPORT_KEYS.test(key) && !SUPPORT_NOT_CARRIED.test(key));
+}
+
+export const SETTABLE_HINT = "the part's own settings (walls, shells, infill, surfaces, seam, brim, skirt, supports, "
+  + "ironing, fuzzy skin), never the machine's, the filament's or the file's";
+
+/**
  * Your own decisions about the part — brim, infill, walls — on top of a flattened preset, recorded in
  * the file the slicer is handed so the G-code header reads back what was asked for.
  */
@@ -218,6 +250,7 @@ export function applyOverrides(flatPath: string, pairs: string[]): Replaced[] {
         `--set refuses '${key}': temperatures, speeds, accelerations, flow and fan come from the preset, never from a command line`,
       );
     }
+    if (!settable(key)) throw new Error(`--set refuses '${key}': it takes ${SETTABLE_HINT}`);
     if (!(key in flat)) throw new Error(`--set refuses '${key}': the process preset has no such setting`);
     applied.push({ key, was: JSON.stringify(flat[key]), now: value });
     flat[key] = Array.isArray(flat[key]) ? [value] : value;

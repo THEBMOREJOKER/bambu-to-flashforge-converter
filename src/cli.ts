@@ -24,30 +24,58 @@ const bad = (s: string) => `  ✗ ${s}`;
 const warn = (s: string) => `  ! ${s}`;
 const mb = (bytes: number) => `${(bytes / 1e6).toFixed(1)} MB`;
 
-interface Args { positional: string[]; flags: Map<string, string | true>; }
+/**
+ * Every flag a command takes: true when it carries a value, false when it is a switch. A flag not listed is refused,
+ * and so is a value flag with nothing after it. Until 2026-10-03 a switch took the next word as its value, so
+ * `convert lid.stl --keep base.stl` delivered a project without base.stl and said nothing.
+ */
+const FLAGS: Record<string, Record<string, boolean>> = {
+  convert: {
+    process: true, filament: true, scale: true, "scale-z": true, name: true, out: true, set: true, "object-set": true,
+    keep: false, "from-mesh": false, "keep-merged": false, "no-arrange": false, "dry-run": false, "keep-custom-gcode": false,
+  },
+  split: { out: true, "min-tris": true },
+  gui: { port: true, open: false },
+};
 
-function parse(argv: string[]): Args {
+/** Why a flag is gone, when it is. */
+const GONE: Record<string, string> = {
+  plate: "every plate is converted, and a project that needs two plates on the 5M becomes pt1- and pt2-, each checked",
+};
+
+interface Args { positional: string[]; flags: Map<string, string[]>; }
+
+function parse(argv: string[], spec: Record<string, boolean>): Args {
   const positional: string[] = [];
-  const flags = new Map<string, string | true>();
+  const flags = new Map<string, string[]>();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? "";
     if (!arg.startsWith("--")) { positional.push(arg); continue; }
-    const [name, inline] = arg.slice(2).split("=", 2);
-    const next = argv[i + 1];
-    if (inline !== undefined) flags.set(name ?? "", inline);
-    else if (next && !next.startsWith("--")) { flags.set(name ?? "", next); i++; }
-    else flags.set(name ?? "", true);
+    const eq = arg.indexOf("=");
+    const name = eq < 0 ? arg.slice(2) : arg.slice(2, eq);
+    if (!(name in spec)) throw new Error(`--${name} is not a flag here${GONE[name] ? `: ${GONE[name]}` : ""}`);
+    if (!spec[name]) {
+      if (eq >= 0) throw new Error(`--${name} is a switch and takes no value`);
+      flags.set(name, []);
+      continue;
+    }
+    const value = eq >= 0 ? arg.slice(eq + 1) : argv[++i];
+    if (value === undefined || (eq < 0 && value.startsWith("--"))) throw new Error(`--${name} needs a value`);
+    flags.set(name, [...(flags.get(name) ?? []), value]);
   }
   return { positional, flags };
 }
 
-function all(argv: string[], name: string): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === `--${name}` && argv[i + 1]) { out.push(argv[i + 1] ?? ""); i++; }
-    else if ((argv[i] ?? "").startsWith(`--${name}=`)) out.push((argv[i] ?? "").split("=").slice(1).join("="));
-  }
-  return out;
+/** A value flag's last value. */
+const one = (flags: Map<string, string[]>, name: string): string | undefined => flags.get(name)?.at(-1);
+
+/** A positive number, or an error that names the flag. */
+function positive(flags: Map<string, string[]>, name: string): number | undefined {
+  const text = one(flags, name);
+  if (text === undefined) return undefined;
+  const value = Number(text);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`--${name} must be a number greater than 0, got '${text}'`);
+  return value;
 }
 
 function cmdState(): number {
@@ -95,8 +123,19 @@ async function cmdInspect(path: string): Promise<number> {
   return i.verdict === "REFUSE" ? 2 : 0;
 }
 
-function printCheck(path: string): number {
-  return printCheckResult(check(path));
+/** Exit 2 on anything but a clean read: a file that cannot be read is not a file fit to print. */
+function printCheck(path: string | undefined): number {
+  if (!path) {
+    console.log("give one G-code file to check");
+    return 2;
+  }
+  try {
+    return printCheckResult(check(path));
+  } catch (err) {
+    console.log(bad(`${path}: ${err instanceof Error ? err.message : String(err)}`));
+    console.log("\nDO NOT SEND — the file could not be read");
+    return 2;
+  }
 }
 
 function printCheckResult(r: CheckResult): number {
@@ -113,25 +152,31 @@ function printCheckResult(r: CheckResult): number {
 }
 
 async function cmdConvert(argv: string[]): Promise<number> {
-  const { positional, flags } = parse(argv);
-  const processKey = String(flags.get("process") ?? "0.20");
+  const { positional, flags } = parse(argv, FLAGS["convert"] ?? {});
+  if (!positional.length) { console.log("give a project .3mf, or one or more meshes"); return 1; }
+  const processKey = one(flags, "process") ?? "0.20";
   if (!(processKey in PROCESS)) { console.log(`--process must be one of ${Object.keys(PROCESS).join(", ")}`); return 1; }
+  const scale = positive(flags, "scale");
+  const scaleZ = positive(flags, "scale-z");
+  const filament = one(flags, "filament");
+  const name = one(flags, "name");
+  const out = one(flags, "out");
   let lastStep = "";
   const result = await convert({
     inputs: positional,
     process: processKey as keyof typeof PROCESS,
-    ...(flags.has("filament") ? { filament: String(flags.get("filament")) } : {}),
-    ...(flags.has("plate") ? { plate: String(flags.get("plate")) } : {}),
-    ...(flags.has("scale") ? { scale: Number(flags.get("scale")) } : {}),
-    ...(flags.has("scale-z") ? { scaleZ: Number(flags.get("scale-z")) } : {}),
-    ...(flags.has("name") ? { name: String(flags.get("name")) } : {}),
-    ...(flags.has("out") ? { out: String(flags.get("out")) } : {}),
+    ...(filament !== undefined ? { filament } : {}),
+    ...(scale !== undefined ? { scale } : {}),
+    ...(scaleZ !== undefined ? { scaleZ } : {}),
+    ...(name !== undefined ? { name } : {}),
+    ...(out !== undefined ? { out } : {}),
     keep: flags.has("keep"),
     fromMesh: flags.has("from-mesh"),
     keepMerged: flags.has("keep-merged"),
+    keepCustomGcode: flags.has("keep-custom-gcode"),
     arrange: !flags.has("no-arrange"),
-    overrides: all(argv, "set"),
-    objectSets: all(argv, "object-set"),
+    overrides: flags.get("set") ?? [],
+    objectSets: flags.get("object-set") ?? [],
     dryRun: flags.has("dry-run"),
     onLine: (line) => process.stdout.write(`  ${line}\n`),
     // Each step once, as the slicer names it: the command line's progress bar is a column of them.
@@ -170,6 +215,14 @@ async function cmdConvert(argv: string[]): Promise<number> {
     for (const d of result.collapsed.dropped) console.log(warn(`${d}: taken out; add a pause there in Flash Studio if you want the colour change`));
   }
   for (const k of result.collapsed?.kept ?? []) console.log(warn(`the project's ${k} is kept`));
+  const custom = result.collapsed?.custom ?? [];
+  if (custom.length) {
+    const keptAny = custom.some((c) => c.kept);
+    console.log(keptAny
+      ? "the designer's own G-code at a layer — kept on --keep-custom-gcode; the check below reads it:"
+      : "the designer's own G-code at a layer — taken out (--keep-custom-gcode keeps it, and the check reads it):");
+    for (const c of custom) console.log(warn(`${c.at}: ${c.text.replace(/\r?\n/g, " ⏎ ").slice(0, 300)}`));
+  }
   if (result.plateNames?.length) {
     console.log("plate names — taken out of the copy the slicer read, its command line crashes on a named plate:");
     for (const n of result.plateNames) console.log(`  ${n}`);
@@ -211,6 +264,7 @@ async function cmdConvert(argv: string[]): Promise<number> {
     console.log(bad(result.advice ?? "nothing was saved"));
     return result.code;
   }
+  for (const r of result.removed ?? []) console.log(ok(`an earlier file of this job is gone: ${basename(r)}`));
   if (result.parts?.length) {
     for (const p of result.parts) console.log(ok(`saved ${p}`));
     console.log(`done: ${result.parts.length} plates, one file each — open them in Flash Studio one at a time, slice and print from there`);
@@ -237,13 +291,15 @@ async function cmdSplit(argv: string[]): Promise<number> {
     if (argv[i] !== "--split") { rest.push(argv[i] ?? ""); continue; }
     while (argv[i + 1] !== undefined && !(argv[i + 1] ?? "").startsWith("--")) ids.push(argv[++i] ?? "");
   }
-  const { positional, flags } = parse(rest);
+  const { positional, flags } = parse(rest, FLAGS["split"] ?? {});
   const project = positional[0] ?? "";
   if (!project.toLowerCase().endsWith(".3mf")) { console.log("give one project .3mf"); return 1; }
+  const out = one(flags, "out");
+  const minTris = positive(flags, "min-tris");
   const result = await split(project, {
     ids,
-    ...(flags.has("out") ? { out: String(flags.get("out")) } : {}),
-    ...(flags.has("min-tris") ? { minTris: Number(flags.get("min-tris")) } : {}),
+    ...(out !== undefined ? { out } : {}),
+    ...(minTris !== undefined ? { minTris } : {}),
   });
   for (const o of result.objects) {
     const list = o.shells.map((sh) => `${sh.triangles} tris ${sh.size.map((v) => v.toFixed(0)).join("×")} mm`).join(", ");
@@ -261,21 +317,22 @@ async function cmdSplit(argv: string[]): Promise<number> {
 const [command, ...rest] = process.argv.slice(2);
 
 let code = 0;
-switch (command) {
-  case "state": code = cmdState(); break;
-  case "inspect": code = rest[0] ? await cmdInspect(rest[0]) : 1; break;
-  case "check": code = rest[0] ? printCheck(rest[0]) : 1; break;
-  case "split": code = await cmdSplit(rest); break;
-  case "convert": code = await cmdConvert(rest); break;
-  case "open": code = rest[0] ? cmdOpen(rest[0]) : 1; break;
-  case "gui": {
-    const { serve, DEFAULT_PORT } = await import("./gui.js");
-    const { flags } = parse(rest);
-    await serve(Number(flags.get("port") ?? DEFAULT_PORT), flags.has("open"));
-    break; // the server holds the process open; nothing exits below
-  }
-  default:
-    console.log(`b2f <command> [args] — Bambu to Flashforge Converter
+try {
+  switch (command) {
+    case "state": code = cmdState(); break;
+    case "inspect": code = rest[0] ? await cmdInspect(rest[0]) : 1; break;
+    case "check": code = printCheck(rest[0]); break;
+    case "split": code = await cmdSplit(rest); break;
+    case "convert": code = await cmdConvert(rest); break;
+    case "open": code = rest[0] ? cmdOpen(rest[0]) : 1; break;
+    case "gui": {
+      const { serve, DEFAULT_PORT } = await import("./gui.js");
+      const { flags } = parse(rest, FLAGS["gui"] ?? {});
+      await serve(positive(flags, "port") ?? DEFAULT_PORT, flags.has("open"));
+      break; // the server holds the process open; nothing exits below
+    }
+    default:
+      console.log(`b2f <command> [args] — Bambu to Flashforge Converter
 
   state              what is true right now: Flash Studio, its presets, the work folder (read-only)
   inspect FILE       what a file is, and what its designer said; SLICE / CONVERT / CHECK / REFUSE
@@ -286,11 +343,16 @@ switch (command) {
                      one .3mf lands in the out folder (~/3dprint/out/ by default), the proof slice is thrown away
                      --process 0.12|0.20|0.24  --filament NAME  --set KEY=VALUE  --name STEM  --out DIR
                      --object-set 'NAME:KEY=VALUE' (one object alone, as Flash Studio's Add settings — e.g. supports
-                       under the one part with a long bridge: 'lid.stl:support_type=tree(auto)')
+                       under the one part with a long bridge: 'lid.stl:support_type=normal(auto)')
                      --scale F (every direction)  --scale-z F (same footprint, F times as thick)
                      --from-mesh (when the slicer crashes on the project)  --keep (keep the work folder)
                      --keep-merged (leave an object that is really several parts welded into one)
+                     --keep-custom-gcode (keep the designer's own G-code at a layer; taken out by default)
   open FILE.3mf      open a finished project in Flash Studio, to slice and print from there`);
-    code = command ? 1 : 0;
+      code = command ? 1 : 0;
+  }
+} catch (err) {
+  console.log(bad(err instanceof Error ? err.message : String(err)));
+  code = command === "check" ? 2 : 1;
 }
 if (command !== "gui") process.exit(code);

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { keepItems, keepPlate, platesOf } from "../src/plates.js";
+import { keepItems, keepPlate, keepPlateLayers, platesOf } from "../src/plates.js";
 
 const SETTINGS = `<config>
   <object id="2">
@@ -51,4 +51,27 @@ test("the build keeps only the items of the plate's objects", () => {
   const kept = keepItems(build, new Set(["6"]));
   assert.ok(!kept.includes('objectid="2"'));
   assert.ok(kept.includes('objectid="6"'));
+});
+
+test("a plate's own pauses and G-code go with it, renumbered 1, and no other plate's", () => {
+  // Until 2026-10-03 pt2 kept the whole list, filed by plate id, and printed plate 1's pauses.
+  const layers = `<?xml version="1.0" encoding="utf-8"?>
+<custom_gcodes_per_layer>
+<plate>
+<plate_info id="1"/>
+<layer top_z="5" type="1" extruder="1" color="" extra="" gcode="PAUSE"/>
+<mode value="SingleExtruder"/>
+</plate>
+<plate>
+<plate_info id="2"/>
+<layer top_z="12" type="1" extruder="1" color="" extra="" gcode="PAUSE"/>
+<mode value="SingleExtruder"/>
+</plate>
+</custom_gcodes_per_layer>`;
+  const second = keepPlateLayers(layers, 2) ?? "";
+  assert.match(second, /<plate_info id="1"\/>/);
+  assert.match(second, /top_z="12"/);
+  assert.doesNotMatch(second, /top_z="5"/);
+  assert.equal((second.match(/<plate>/g) ?? []).length, 1);
+  assert.equal(keepPlateLayers(layers, 3), null, "a plate with nothing in the list takes no list");
 });

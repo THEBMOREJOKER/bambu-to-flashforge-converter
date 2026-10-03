@@ -17,12 +17,12 @@ import {
 import { execFileSync, spawn } from "node:child_process";
 import { Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 
 import { APPIMAGE, BED_Z, DATADIR, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SSL_CERT } from "./machine.js";
 import {
-  applyOverrides, carryDesigner, findPreset, PRESET_ONLY, type Replaced, restorePreset, selectableFor5M, settingsDiff,
-  writeFlatPreset,
+  applyOverrides, carryDesigner, findPreset, PRESET_ONLY, type Replaced, restorePreset, selectableFor5M, settable,
+  SETTABLE_HINT, settingsDiff, writeFlatPreset,
 } from "./presets.js";
 import { check, type CheckResult, plateObjects, type PlateObject } from "./gcode.js";
 import { plateMap, type PlateMap } from "./platemap.js";
@@ -44,8 +44,6 @@ export interface ConvertOptions {
   inputs: string[];
   process?: keyof typeof PROCESS;
   filament?: string;
-  /** "0" slices every plate. */
-  plate?: string;
   scale?: number;
   /**
    * Same footprint, this many times as thick — the world Z of every object on the plate. The slicer's own `--scale`
@@ -66,6 +64,8 @@ export interface ConvertOptions {
   overrides?: string[];
   /** NAME:KEY=VALUE — a setting for one object alone, as Flash Studio's "Add settings" makes it: supports under the one part that needs them. */
   objectSets?: string[];
+  /** Keep the designer's own G-code at a layer. Off by default: it is taken out, and its text is shown. */
+  keepCustomGcode?: boolean;
   dryRun?: boolean;
   /** Every line the slicer prints, as it prints it — the GUI shows these live. */
   onLine?: (line: string) => void;
@@ -96,6 +96,8 @@ export interface ConvertResult {
   project3mf: string;
   /** A project that needs more than one plate is one file per plate — pt1-, pt2- — and project3mf is the first. */
   parts?: string[];
+  /** Files an earlier run of this job left beside the one just written, taken away: one file per job. */
+  removed?: string[];
   delivered: boolean;
   /** The throwaway folder the slicer worked in; gone unless `workKept`. */
   work: string;
@@ -242,19 +244,18 @@ export async function runCli(
 }
 
 export async function convert(options: ConvertOptions): Promise<ConvertResult> {
-  // A throw after the work folder exists must not leave it behind.
-  const before = new Set(existsSync(tmpdir()) ? readdirSync(tmpdir()).filter((f) => f.startsWith("b2f-work-")) : []);
+  // A throw after the work folder exists must not leave it behind — this job's folder, by its name: the app runs
+  // jobs side by side, and a sweep of every new folder took another job's work with it.
+  const job: { work?: string } = {};
   try {
-    return await convertIn(options);
+    return await convertIn(options, job);
   } catch (err) {
-    for (const f of readdirSync(tmpdir())) {
-      if (f.startsWith("b2f-work-") && !before.has(f)) rmSync(join(tmpdir(), f), { recursive: true, force: true });
-    }
+    if (job.work) rmSync(job.work, { recursive: true, force: true });
     throw err;
   }
 }
 
-async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
+async function convertIn(options: ConvertOptions, job: { work?: string }): Promise<ConvertResult> {
   const inputs = options.inputs.map((p) => (p.startsWith("/") ? p : join(process.cwd(), p)));
   const first = inputs[0] ?? "";
   const low = first.toLowerCase();
@@ -293,6 +294,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     if (PRESET_ONLY.test(set.key)) {
       return fail(`--object-set refuses '${set.key}': temperatures, speeds, accelerations, flow and fan come from the preset, never from a command line`);
     }
+    if (!settable(set.key)) return fail(`--object-set refuses '${set.key}': it takes ${SETTABLE_HINT}`);
     objectSets.push(set);
   }
   if (objectSets.length && !isProject) {
@@ -322,10 +324,17 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
 
   const baseStem = basename(first).replace(/\.[^.]+$/, "");
   const stem = options.name ?? (fromMesh ? `${baseStem}-mesh` : baseStem);
-  const out = options.out ?? OUTDIR;
+  const out = resolve(options.out ?? OUTDIR);
+  // The name is a file name and nothing more: Node's join keeps a "..", and the finished file would land wherever it
+  // pointed.
+  if (!stem.trim() || /[/\\\0]/.test(stem) || stem === "." || stem === "..") {
+    return fail(`the name '${stem}' must be a plain file name: no folder in it, no ".."`);
+  }
   const project3mf = join(out, `${stem}-ad5m.3mf`);
+  if (!project3mf.startsWith(out + sep)) return fail(`the name '${stem}' leaves ${out}`);
   // Everything the slicer needs and leaves behind lives here, and goes when the job is done.
   const work = mkdtempSync(join(tmpdir(), "b2f-work-"));
+  job.work = work;
 
   // A project carries the designer's instructions and its own settings; both matter before a slice.
   let slots = 1;
@@ -354,7 +363,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
           broken = stripped.found;
           if (broken.length) project = stripped.settings;
         }
-        collapse = collapseFilaments(zip);
+        collapse = collapseFilaments(zip, Boolean(options.keepCustomGcode));
         modelXml = modelSettings(zip);
         const ids = project?.["filament_settings_id"];
         if (Array.isArray(ids) && ids.length) slots = ids.length;
@@ -486,8 +495,8 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     }
     return cleanedPath;
   };
-  const collapsed = collapse && (collapse.moved.length || collapse.dropped.length || collapse.kept.length)
-    ? { moved: collapse.moved, dropped: collapse.dropped, kept: collapse.kept }
+  const collapsed = collapse && (collapse.moved.length || collapse.dropped.length || collapse.kept.length || collapse.custom.length)
+    ? { moved: collapse.moved, dropped: collapse.dropped, kept: collapse.kept, custom: collapse.custom }
     : undefined;
   if (single || broken.length || plateNames.length || variants.keys.length || apart?.objects.length || thick
     || objectSets.length || (collapse && Object.keys(collapse.members).length)) {
@@ -496,6 +505,9 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     for (const d of collapse?.dropped ?? []) options.onLine?.(`one extruder: the project's ${d} is taken out — add a pause there in Flash Studio if you want the colour change`);
   }
   for (const k of collapse?.kept ?? []) options.onLine?.(`the project's ${k} is kept`);
+  for (const c of collapse?.custom ?? []) {
+    options.onLine?.(`the designer's own G-code ${c.at}, ${c.kept ? "kept, and the check reads it" : "taken out (--keep-custom-gcode keeps it)"}: ${oneLine(c.text)}`);
+  }
   for (const b of broken) {
     options.onLine?.(`line break taken out of ${b.key}${b.slot ? ` slot ${b.slot}` : ""} in the copy the slicer reads — it would have become a command above the start block: ${b.text}`);
   }
@@ -527,7 +539,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     "--allow-newer-file",          // bare switches: a 1 after them is read as a file name
     "--skip-modified-gcodes",
     "--arrange", options.arrange === false ? "0" : "1",
-    "--slice", options.plate ?? "0",
+    "--slice", "0",
     "--export-3mf", exported,
     "--outputdir", work,
   ];
@@ -698,6 +710,13 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   }
   slicerWarnings = [...new Set([...plateWarnings, ...slicerWarnings, ...partWarnings])];
   if (parts.length) delivered = true;
+  // One file per job: what an earlier run of this job left beside the file just written goes — a single file when
+  // the job is now pt-files, pt-files when it is now one file, a pt3 when it is now two plates.
+  const removed = delivered ? staleOutputs(out, stem, parts.length ? parts : [project3mf]) : [];
+  for (const r of removed) {
+    rmSync(r, { force: true });
+    options.onLine?.(`an earlier file of this job is gone: ${basename(r)}`);
+  }
   for (const w of slicerWarnings) options.onLine?.(`Flash Studio warns: ${w}`);
   progress("done", delivered ? 100 : last, delivered ? "saved for Flash Studio" : worst === 2 ? "a plate failed the check" : "no project was written");
 
@@ -708,6 +727,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     : delivered ? undefined : `the slicer wrote no project file; the slice is in ${work}`;
   return {
     ...base, ...(parts.length ? { project3mf: parts[0] ?? project3mf, parts } : {}),
+    ...(removed.length ? { removed } : {}),
     delivered, workKept: finish(Boolean(options.keep) || !delivered),
     plates, checks, maps, slicerWarnings,
     cliExit: run.exit, cliSignal: run.signal, errorString,
@@ -715,6 +735,24 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     ...(advice ? { advice } : {}),
     code: worst === 2 || !delivered ? 2 : 0,
   };
+}
+
+/** Text on one line for a log: line breaks shown, cut short. */
+const oneLine = (text: string) => {
+  const flat = text.replace(/\r?\n/g, " ⏎ ").trim();
+  return flat.length > 200 ? `${flat.slice(0, 200)} …` : flat;
+};
+
+/**
+ * The files of this job in `out` other than the ones just written: `<stem>-ad5m.3mf` and `pt<N>-<stem>-ad5m.3mf`, by
+ * exact name. A job is its stem; no other file is touched.
+ */
+export function staleOutputs(out: string, stem: string, written: readonly string[]): string[] {
+  if (!existsSync(out)) return [];
+  const keep = new Set(written.map((p) => basename(p)));
+  const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const mine = new RegExp(`^(pt\\d+-)?${escaped}-ad5m\\.3mf$`);
+  return readdirSync(out).filter((f) => mine.test(f) && !keep.has(f)).sort().map((f) => join(out, f));
 }
 
 /** The objects the slicer placed on a plate, from the plate_N.json in the project it exported beside the G-code. */

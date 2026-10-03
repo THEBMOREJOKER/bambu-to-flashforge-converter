@@ -184,7 +184,7 @@ test("a project already on one slot is left alone", () => {
     "Metadata/model_settings.config": MODEL_SETTINGS.replace(/value="(10|3)"/g, 'value="1"'),
   }), (zip) => {
     const c = collapseFilaments(zip);
-    assert.deepEqual(c, { members: {}, moved: [], dropped: [], kept: [] });
+    assert.deepEqual(c, { members: {}, moved: [], dropped: [], kept: [], custom: [] });
   });
 });
 
@@ -297,6 +297,27 @@ test("with two slots only filament keys are cut", () => {
 test("a single-slot project is not touched", () => {
   const project = { filament_settings_id: ["a"], nozzle_temperature: ["220"] };
   assert.equal(oneSlot(project, null, new Set(), new Set()).settings, project);
+});
+
+test("the designer's own G-code at a layer is taken out with its text, and kept only when asked", () => {
+  const layers = LAYERS.replace('<mode value="MultiAsSingle"/>',
+    '<layer top_z="20" type="4" extruder="1" color="" extra="SET_HEATER_TEMPERATURE HEATER=extruder TARGET=300&#10;M117 hi" gcode="x"/>\n'
+    + '<layer top_z="25" extruder="1" color="" gcode="M104 S290"/>\n<mode value="MultiAsSingle"/>');
+  withZip(projectWith({ "Metadata/custom_gcode_per_layer.xml": layers }), (zip) => {
+    const c = collapseFilaments(zip);
+    assert.deepEqual(c.custom, [
+      { at: "at 20.00 mm", text: "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=300\nM117 hi", kept: false },
+      // A list from PrusaSlicer 2.2 or older has no type, and its own G-code is the text.
+      { at: "at 25.00 mm", text: "M104 S290", kept: false },
+    ]);
+    assert.deepEqual(c.kept, ["pause at 10.00 mm"]);
+    const left = c.members["Metadata/custom_gcode_per_layer.xml"]?.toString("utf8") ?? "";
+    assert.doesNotMatch(left, /TARGET=300|M104 S290/);
+    assert.match(left, /type="1"/);
+    const keep = collapseFilaments(zip, true);
+    assert.deepEqual(keep.custom.map((k) => k.kept), [true, true]);
+    assert.match(keep.members["Metadata/custom_gcode_per_layer.xml"]?.toString("utf8") ?? "", /TARGET=300/);
+  });
 });
 
 test("a layer list left empty is dropped with its file", () => {

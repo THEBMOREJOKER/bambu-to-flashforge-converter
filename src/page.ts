@@ -338,7 +338,10 @@ function svg(tag, attrs) {
   return node;
 }
 async function api(path, body) {
-  const options = body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {};
+  // Every request that does something carries the app's own header: the server refuses one without it.
+  const options = body
+    ? { method: "POST", headers: { "Content-Type": "application/json", "X-B2F": "1" }, body: JSON.stringify(body) }
+    : {};
   const response = await fetch(path, options);
   if (!response.ok) throw new Error(await response.text());
   return response.json();
@@ -678,6 +681,12 @@ function renderChanges(r) {
     blocks.push(change("Moved onto the one extruder", null, r.collapsed.moved.concat(
       r.collapsed.dropped.map((d) => d + " — taken out; a pause there is yours to ask for"))));
   }
+  if (r.collapsed && r.collapsed.custom && r.collapsed.custom.length) {
+    const keptAny = r.collapsed.custom.some((c) => c.kept);
+    blocks.push(change("The designer's own G-code at a layer",
+      keptAny ? "Kept, and the check read it like every other line." : "Taken out: it would have run on the printer as written. The command line keeps it with --keep-custom-gcode.",
+      r.collapsed.custom.map((c) => c.at + ": " + c.text.replace(/\r?\n/g, " ⏎ ").slice(0, 300))));
+  }
   if (r.droppedKeys && r.droppedKeys.length) {
     blocks.push(change("Values Flash Studio refuses, dropped", "The AD5M preset supplies them.", null, r.droppedKeys.join(", ")));
   }
@@ -741,8 +750,11 @@ function renderVerdict(r) {
   const failed = r.checks.some((c) => c.code === 2);
   const passed = lines.filter((l) => l.state === "ok").length;
   const warned = lines.filter((l) => l.state === "warn").length;
+  // Green only for a file that was saved: a clean check with nothing written is not a file to print.
   box.appendChild(failed
     ? stamp("bad", "Do not print this", lines.filter((l) => l.state === "bad").length + " check(s) failed — nothing was saved")
+    : !r.delivered
+    ? stamp("bad", "Nothing was saved", r.advice || "the checks passed, but no file was written")
     : stamp("ok", "Fit to print", "Sliced for the Adventurer 5M 0.4 · " + passed + " checks passed" +
       (warned ? " · read the " + (warned === 1 ? "warning" : warned + " warnings") + " below" : "")));
   r.checks.forEach((c, n) => {
@@ -763,8 +775,6 @@ function renderVerdict(r) {
     }
     box.appendChild(act);
     box.appendChild(el("p", "fine", (files.length > 1 ? files.length + " plates, one file each. " : "") + "Slice and print from there. Saved as " + files.join(", ")));
-  } else if (!failed) {
-    box.appendChild(flag("bad", r.advice || "Nothing was saved."));
   }
   const all = el("details", "checks");
   all.appendChild(el("summary", null, "Every check (" + lines.length + ")"));
@@ -846,7 +856,7 @@ function setupDrop() {
     let saved = null;
     try {
       const response = await fetch("/api/upload", {
-        method: "POST", headers: { "x-filename": encodeURIComponent(file.name) }, body: await file.arrayBuffer() });
+        method: "POST", headers: { "x-filename": encodeURIComponent(file.name), "X-B2F": "1" }, body: await file.arrayBuffer() });
       if (response.ok) saved = (await response.json()).saved;
     } finally {
       text.textContent = "Drop a model here, or browse";
@@ -868,7 +878,9 @@ $("#slice").onclick = () => slice(false);
 setupDrop();
 drawPlate(null, false);
 loadState();
-setInterval(loadState, 20000);
+// The header reads the printer's status while the page is in view, and not while it sits in a background tab.
+setInterval(() => { if (document.visibilityState === "visible") loadState(); }, 20000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") loadState(); });
 `;
 
 const GLYPH = `<svg class="glyph" viewBox="0 0 34 34" aria-hidden="true">

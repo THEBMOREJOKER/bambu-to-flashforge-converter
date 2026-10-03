@@ -10,7 +10,8 @@ import { after, test } from "node:test";
 
 import { LIBRARY, MACHINE_JSON } from "../src/machine.js";
 import {
-  applyOverrides, carryDesigner, filamentChoices, findPreset, flattenPreset, restorePreset, selectableFor5M, settingsDiff,
+  applyOverrides, carryDesigner, filamentChoices, findPreset, flattenPreset, restorePreset, selectableFor5M, settable,
+  settingsDiff,
 } from "../src/presets.js";
 
 // Every scratch folder a test makes goes when the file is done.
@@ -102,7 +103,22 @@ test("the machine's own numbers are refused", () => {
 });
 
 test("an unknown setting is refused", () => {
-  assert.throws(() => applyOverrides(scratchFlat({ brim_type: "no_brim" }), ["brim_typo=auto_brim"]), /no such setting/);
+  assert.throws(() => applyOverrides(scratchFlat({ brim_type: "no_brim" }), ["brim_typo=auto_brim"]), /refuses 'brim_typo'/);
+  assert.throws(() => applyOverrides(scratchFlat({ wall_loops: "2" }), ["wall_loops=3", "brim_type=auto_brim"]), /no such setting/);
+});
+
+test("--set takes the part's own settings and nothing of the machine, the filament or the file", () => {
+  // Until 2026-10-03 a denylist let post_process through, a command Flash Studio's window runs on export.
+  for (const key of ["post_process", "filename_format", "outer_wall_line_width", "support_filament", "gcode_label_objects",
+    "machine_start_gcode", "nozzle_temperature", "layer_height", "print_sequence"]) {
+    assert.equal(settable(key), false, key);
+    assert.throws(() => applyOverrides(scratchFlat({ [key]: "x" }), [`${key}=y`]), /refuses/, key);
+  }
+  for (const key of ["wall_loops", "sparse_infill_density", "top_shell_layers", "seam_position", "brim_type", "wall_generator",
+    "support_type", "support_on_build_plate_only", "support_top_z_distance", "tree_support_tip_diameter", "ironing_type",
+    "top_surface_pattern", "fuzzy_skin"]) {
+    assert.equal(settable(key), true, key);
+  }
 });
 
 test("a list-valued setting stays a list", () => {

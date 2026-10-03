@@ -10,6 +10,7 @@ import type { Zip } from "./zip.js";
 
 const MODEL = "3D/3dmodel.model";
 const SETTINGS = "Metadata/model_settings.config";
+const LAYERS = "Metadata/custom_gcode_per_layer.xml";
 
 /** Each plate's number and the object ids placed on it, in plate order. */
 export function platesOf(settingsXml: string): Array<{ plate: number; objects: string[] }> {
@@ -42,6 +43,20 @@ export function keepPlate(settingsXml: string, plate: number, keep: ReadonlySet<
     .replace(/\s*<assemble_item\b[^>]*?object_id="(\d+)"[^>]*?\/>/g, (whole: string, id: string) => (keep.has(id) ? whole : ""));
 }
 
+/**
+ * The layer list with only this plate's pauses and G-code, renumbered 1, or null when that plate has none. The slicer
+ * files them by plate id (bbs_3mf.cpp), so a pt2 left with the whole list got plate 1's pauses and lost its own.
+ */
+export function keepPlateLayers(layersXml: string, plate: number): string | null {
+  let kept = false;
+  const next = layersXml.replace(/\s*<plate>[\s\S]*?<\/plate>/g, (whole: string) => {
+    if (Number(/<plate_info\s+id="(\d+)"/.exec(whole)?.[1] ?? 0) !== plate) return "";
+    kept = /<layer\b/.test(whole);
+    return whole.replace(/(<plate_info\s+id=")\d+(")/, "$11$2");
+  });
+  return kept ? next : null;
+}
+
 /** The members to change so a copy of this project holds one plate and no slice results. */
 export function onePlateChanges(zip: Zip, plate: number, objects: readonly string[]): Record<string, Buffer | null> {
   const keep = new Set(objects);
@@ -56,6 +71,10 @@ export function onePlateChanges(zip: Zip, plate: number, objects: readonly strin
     model.subarray(0, start), Buffer.from(keepItems(build, keep)), model.subarray(end + "</build>".length),
   ]);
   if (zip.has(SETTINGS)) changes[SETTINGS] = Buffer.from(keepPlate(zip.readText(SETTINGS), plate, keep));
+  if (zip.has(LAYERS)) {
+    const layers = keepPlateLayers(zip.readText(LAYERS), plate);
+    changes[LAYERS] = layers === null ? null : Buffer.from(layers);
+  }
   for (const name of zip.names()) {
     if (/^Metadata\/(plate_\d+\.(gcode|gcode\.md5|json|png)|plate_no_light_\d+\.png|top_\d+\.png|pick_\d+\.png|slice_info\.config)$/.test(name)) {
       changes[name] = null;
