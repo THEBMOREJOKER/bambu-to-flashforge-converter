@@ -11,7 +11,7 @@ import { after, test } from "node:test";
 import { withZip } from "../src/zip.js";
 import {
   blankPlateNames, cleanNote, collapseFilaments, extruderVariants, firstSlot, notes, objectSettings, oneSlot,
-  outOfRangeKeys, type ProjectSettings, projectSettings, sliceWarnings, unslicedChanges,
+  outOfRangeKeys, type ProjectSettings, projectSettings, setObjectSettings, sliceWarnings, unslicedChanges,
   stripBreaks,
 } from "../src/threemf.js";
 import { copyZipWith, writeZip } from "../src/zipwrite.js";
@@ -384,4 +384,56 @@ test("stripBreaks catches a carriage return in a filament type and in an id", ()
   } as never);
   assert.equal(found.length, 2);
   assert.deepEqual(found.map((f) => f.key).sort(), ["filament_settings_id", "filament_type"]);
+});
+
+// Two objects the way a Bambu project writes them, one carrying a setting of its own already.
+const TWO_OBJECTS = `<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <object id="2">
+    <metadata key="name" value="Base &amp; Lid.stl"/>
+    <metadata key="extruder" value="1"/>
+    <part id="1" subtype="normal_part">
+      <metadata key="name" value="Base &amp; Lid.stl"/>
+    </part>
+  </object>
+  <object id="6">
+    <metadata key="name" value="lid.stl"/>
+    <metadata key="extruder" value="1"/>
+    <metadata key="support_type" value="normal(manual)"/>
+    <part id="5" subtype="normal_part">
+      <metadata key="name" value="lid.stl"/>
+    </part>
+  </object>
+</config>
+`;
+
+test("one object gets a setting of its own, ahead of its parts, and the other object is not touched", () => {
+  const r = setObjectSettings(TWO_OBJECTS, [
+    { object: "lid.stl", key: "support_type", value: "tree(auto)" },
+    { object: "lid.stl", key: "support_on_build_plate_only", value: "1" },
+  ]);
+  assert.deepEqual(r.unknown, []);
+  assert.deepEqual(r.names, ["Base & Lid.stl", "lid.stl"]);
+  assert.deepEqual(r.applied, [
+    { object: "lid.stl", key: "support_type", value: "tree(auto)", was: "normal(manual)" },
+    { object: "lid.stl", key: "support_on_build_plate_only", value: "1", was: "" },
+  ]);
+  const lid = /<object id="6">([\s\S]*?)<\/object>/.exec(r.xml)?.[1] ?? "";
+  const head = lid.split("<part", 1)[0] ?? "";
+  assert.ok(head.includes('<metadata key="support_type" value="tree(auto)"/>'));
+  assert.ok(head.includes('    <metadata key="support_on_build_plate_only" value="1"/>\n    '));
+  assert.equal((lid.match(/support_type/g) ?? []).length, 1, "the old value is replaced, not doubled");
+  const base = /<object id="2">([\s\S]*?)<\/object>/.exec(r.xml)?.[1] ?? "";
+  assert.equal(base, /<object id="2">([\s\S]*?)<\/object>/.exec(TWO_OBJECTS)?.[1] ?? "");
+});
+
+test("an object is found by its name as written, escapes and all, and a name no object has is returned", () => {
+  const r = setObjectSettings(TWO_OBJECTS, [
+    { object: "Base & Lid.stl", key: "brim_type", value: "outer_only" },
+    { object: "missing.stl", key: "support_type", value: "tree(auto)" },
+  ]);
+  assert.deepEqual(r.unknown, ["missing.stl"]);
+  assert.ok(r.xml.includes('<metadata key="brim_type" value="outer_only"/>'));
+  const quoted = setObjectSettings(TWO_OBJECTS, [{ object: "lid.stl", key: "sparse_infill_pattern", value: 'a"b<c' }]);
+  assert.ok(quoted.xml.includes('value="a&quot;b&lt;c"'));
 });

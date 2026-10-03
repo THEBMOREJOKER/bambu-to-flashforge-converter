@@ -133,6 +133,53 @@ export function blankPlateNames(modelXml: string): PlateNames {
   return { xml, names };
 }
 
+/** One object's own setting: the object as the project names it, the key, the value. */
+export interface ObjectSet { object: string; key: string; value: string; }
+
+export interface ObjectSets {
+  xml: string;
+  /** What each object now carries, and what it carried before ("" for nothing of its own). */
+  applied: Array<ObjectSet & { was: string }>;
+  /** Names asked for that no object has. */
+  unknown: string[];
+  /** Every object name the project has, in its order. */
+  names: string[];
+}
+
+const escapeXml = (text: string) =>
+  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/**
+ * Settings for one object alone, written the way Flash Studio's right-click "Add settings" writes them: a metadata
+ * line under the object, ahead of its parts. The slicer reads them over the process for that object only, and the
+ * finished project carries them, so Flash Studio shows them on the object. A key the object already has is replaced.
+ */
+export function setObjectSettings(modelXml: string, sets: ObjectSet[]): ObjectSets {
+  const names: string[] = [];
+  const applied: ObjectSets["applied"] = [];
+  const xml = modelXml.replace(/(<object id="[^"]+"\s*>)([\s\S]*?)(<\/object>)/g,
+    (whole: string, open: string, body: string, close: string) => {
+      const cut = body.indexOf("<part");
+      let head = cut < 0 ? body : body.slice(0, cut);
+      const rest = cut < 0 ? "" : body.slice(cut);
+      const name = unescapeOnce(/<metadata key="name" value="([^"]*)"/.exec(head)?.[1] ?? "");
+      names.push(name);
+      const mine = sets.filter((s) => s.object === name);
+      if (!mine.length) return whole;
+      const indent = /\n([ \t]*)$/.exec(head)?.[1] ?? "    ";
+      for (const s of mine) {
+        const line = `<metadata key="${escapeXml(s.key)}" value="${escapeXml(s.value)}"/>`;
+        const have = new RegExp(`<metadata key="${s.key.replace(/[^\w]/g, "\\$&")}" value="([^"]*)"\\s*/>`);
+        const was = have.exec(head)?.[1];
+        head = was === undefined ? `${head}${line}\n${indent}` : head.replace(have, line);
+        applied.push({ ...s, was: was === undefined ? "" : unescapeOnce(was) });
+      }
+      return `${open}${head}${rest}${close}`;
+    });
+  const unknown = [...new Set(sets.map((s) => s.object))].filter((n) => !names.includes(n));
+  return { xml, applied, unknown, names };
+}
+
 export interface Collapse {
   /** Members to write over the project's own (null drops one); empty when the project already prints from one slot. */
   members: Record<string, Buffer | null>;

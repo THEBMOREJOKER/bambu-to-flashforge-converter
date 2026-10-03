@@ -131,6 +131,7 @@ async function cmdConvert(argv: string[]): Promise<number> {
     keepMerged: flags.has("keep-merged"),
     arrange: !flags.has("no-arrange"),
     overrides: all(argv, "set"),
+    objectSets: all(argv, "object-set"),
     dryRun: flags.has("dry-run"),
     onLine: (line) => process.stdout.write(`  ${line}\n`),
     // Each step once, as the slicer names it: the command line's progress bar is a column of them.
@@ -154,6 +155,10 @@ async function cmdConvert(argv: string[]): Promise<number> {
   if (result.overrides.length) {
     console.log("your own choices, on top of the process preset:");
     for (const o of result.overrides) console.log(`  ${o.key}: ${o.was} → ${o.now}`);
+  }
+  if (result.objectSets?.length) {
+    console.log("one object's own settings, the way Flash Studio's Add settings writes them:");
+    for (const o of result.objectSets) console.log(`  '${o.object}': ${o.key} = ${o.value}${o.was ? ` (it had ${o.was})` : ""}`);
   }
   if (result.replaced.length) {
     console.log(`the project's own model-facing settings that the AD5M preset replaces (${result.replaced.length}):`);
@@ -280,6 +285,8 @@ switch (command) {
   convert INPUT…     turn a Bambu project (or meshes) into a Flash Studio project for the AD5M 0.4, checked;
                      one .3mf lands in the out folder (~/3dprint/out/ by default), the proof slice is thrown away
                      --process 0.12|0.20|0.24  --filament NAME  --set KEY=VALUE  --name STEM  --out DIR
+                     --object-set 'NAME:KEY=VALUE' (one object alone, as Flash Studio's Add settings — e.g. supports
+                       under the one part with a long bridge: 'lid.stl:support_type=tree(auto)')
                      --scale F (every direction)  --scale-z F (same footprint, F times as thick)
                      --from-mesh (when the slicer crashes on the project)  --keep (keep the work folder)
                      --keep-merged (leave an object that is really several parts welded into one)

@@ -21,7 +21,8 @@ import { basename, join } from "node:path";
 
 import { APPIMAGE, BED_Z, DATADIR, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SSL_CERT } from "./machine.js";
 import {
-  applyOverrides, carryDesigner, findPreset, type Replaced, restorePreset, selectableFor5M, settingsDiff, writeFlatPreset,
+  applyOverrides, carryDesigner, findPreset, PRESET_ONLY, type Replaced, restorePreset, selectableFor5M, settingsDiff,
+  writeFlatPreset,
 } from "./presets.js";
 import { check, type CheckResult, plateObjects, type PlateObject } from "./gcode.js";
 import { plateMap, type PlateMap } from "./platemap.js";
@@ -31,8 +32,8 @@ import { split } from "./split.js";
 import { thicken, type ThickenedObject } from "./thicken.js";
 import {
   blankPlateNames, type Collapse, collapseFilaments, extruderVariants, type Notes, notes, type ObjectSetting,
-  objectSettings, outOfRangeKeys, modelSettings, oneSlot, type OneSlot, projectSettings, sliceWarnings,
-  unslicedChanges, type Variants,
+  objectSettings, outOfRangeKeys, modelSettings, oneSlot, type OneSlot, type ObjectSet, projectSettings, setObjectSettings,
+  sliceWarnings, unslicedChanges, type Variants,
   type Broken, stripBreaks,
 } from "./threemf.js";
 import { copyZipWith } from "./zipwrite.js";
@@ -63,6 +64,8 @@ export interface ConvertOptions {
   keepMerged?: boolean;
   /** KEY=VALUE decisions about the part, on top of the process preset. */
   overrides?: string[];
+  /** NAME:KEY=VALUE — a setting for one object alone, as Flash Studio's "Add settings" makes it: supports under the one part that needs them. */
+  objectSets?: string[];
   dryRun?: boolean;
   /** Every line the slicer prints, as it prints it — the GUI shows these live. */
   onLine?: (line: string) => void;
@@ -109,6 +112,8 @@ export interface ConvertResult {
   replaced: Replaced[];
   /** The designer's own supports, brim, infill and walls, carried over the preset's. */
   kept: Replaced[];
+  /** Settings given to one object alone (--object-set), and what that object carried before. */
+  objectSets?: Array<ObjectSet & { was: string }>;
   overrides: Replaced[];
   command: string[];
   cliExit: number | null;
@@ -279,6 +284,23 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   if (thicker !== 1 && fromMesh) {
     return fail("--scale-z and --from-mesh do not go together: the mesh is sliced on its own, and the placement --scale-z scales is the project's");
   }
+  const objectSets: ObjectSet[] = [];
+  for (const pair of options.objectSets ?? []) {
+    const eq = pair.indexOf("=");
+    const colon = eq < 0 ? -1 : pair.lastIndexOf(":", eq);
+    if (colon <= 0) return fail(`--object-set wants NAME:KEY=VALUE, got '${pair}'`);
+    const set = { object: pair.slice(0, colon).trim(), key: pair.slice(colon + 1, eq).trim(), value: pair.slice(eq + 1).trim() };
+    if (PRESET_ONLY.test(set.key)) {
+      return fail(`--object-set refuses '${set.key}': temperatures, speeds, accelerations, flow and fan come from the preset, never from a command line`);
+    }
+    objectSets.push(set);
+  }
+  if (objectSets.length && !isProject) {
+    return fail("--object-set needs a project (.3mf): a mesh has no objects of its own to give a setting to");
+  }
+  if (objectSets.length && fromMesh) {
+    return fail("--object-set and --from-mesh do not go together: the mesh is sliced without the project's objects");
+  }
   let last = 0;
   const progress = (stage: Progress["stage"], percent: number, text: string, extra: Partial<Progress> = {}): void => {
     last = Math.max(0, Math.min(100, Math.round(percent)));
@@ -413,6 +435,21 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
   // The slicer's command line crashes on a plate that has a name, so the names come out of the copy it reads.
   const plateNames = modelXml ? blankPlateNames(modelXml).names : [];
 
+  // One object's own settings — supports under the one part that needs them — go into the copy the slicer reads, as
+  // Flash Studio's "Add settings" writes them, so the check holds the slice that carries them.
+  let objectApplied: Array<ObjectSet & { was: string }> = [];
+  if (objectSets.length) {
+    const processKeys = keysOf(flatProcess.file);
+    for (const s of objectSets) {
+      if (!processKeys.has(s.key)) throw new Error(`--object-set refuses '${s.key}': the process preset has no such setting`);
+    }
+    const tried = setObjectSettings(modelXml ?? "", objectSets);
+    if (tried.unknown.length) {
+      throw new Error(`--object-set: no object named ${tried.unknown.map((n) => `'${n}'`).join(", ")} — the project has ${tried.names.map((n) => `'${n}'`).join(", ")}`);
+    }
+    objectApplied = tried.applied;
+  }
+
   // The slicer is handed a copy whenever the project has to change: slots collapsed, plate names, nozzle kinds and
   // refused keys taken out.
   const cleanedPath = join(work, `${stem}-cleaned-input.3mf`);
@@ -422,6 +459,10 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     if (plateNames.length) {
       const current = changes["Metadata/model_settings.config"]?.toString("utf8") ?? modelXml ?? "";
       changes["Metadata/model_settings.config"] = Buffer.from(blankPlateNames(current).xml);
+    }
+    if (objectSets.length) {
+      const current = changes["Metadata/model_settings.config"]?.toString("utf8") ?? modelXml ?? "";
+      changes["Metadata/model_settings.config"] = Buffer.from(setObjectSettings(current, objectSets).xml);
     }
     const drop = [...dropKeys, ...variants.keys];
     if ((drop.length || single || broken.length) && project) {
@@ -449,7 +490,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     ? { moved: collapse.moved, dropped: collapse.dropped, kept: collapse.kept }
     : undefined;
   if (single || broken.length || plateNames.length || variants.keys.length || apart?.objects.length || thick
-    || (collapse && Object.keys(collapse.members).length)) {
+    || objectSets.length || (collapse && Object.keys(collapse.members).length)) {
     sliceInputs = [writeCleaned([])];
     for (const m of collapse?.moved ?? []) options.onLine?.(`one extruder: ${m}`);
     for (const d of collapse?.dropped ?? []) options.onLine?.(`one extruder: the project's ${d} is taken out — add a pause there in Flash Studio if you want the colour change`);
@@ -459,6 +500,9 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     options.onLine?.(`line break taken out of ${b.key}${b.slot ? ` slot ${b.slot}` : ""} in the copy the slicer reads — it would have become a command above the start block: ${b.text}`);
   }
   for (const n of plateNames) options.onLine?.(`plate name taken out of the copy the slicer reads, its command line crashes on one — ${n}`);
+  for (const a of objectApplied) {
+    options.onLine?.(`'${a.object}' alone: ${a.key} = ${a.value}${a.was ? ` (it had ${a.was})` : ""}`);
+  }
   if (variants.keys.length) {
     options.onLine?.(`one kind of nozzle: the project names ${variants.kinds.join(" and ")}, the 5M has one — their lists come out of the copy the slicer reads: ${variants.keys.join(", ")}`);
   }
@@ -497,6 +541,7 @@ async function convertIn(options: ConvertOptions): Promise<ConvertResult> {
     replaced,
     kept,
     overrides: applied,
+    ...(objectApplied.length ? { objectSets: objectApplied } : {}),
     command,
     ...(collapsed ? { collapsed } : {}),
     ...(plateNames.length ? { plateNames } : {}),
