@@ -19,6 +19,13 @@ b2f convert ~/3dprint/in/model.3mf    →    ~/3dprint/out/model-ad5m.3mf    →
   colours at a layer. The slicer would write that as tool changes the 5M cannot make. Every object and part moves to
   slot 1, every per-slot list is cut to one slot, and tool and colour changes are taken out and listed. Add a pause
   in Flash Studio if you want the colour change back. Pauses the designer set stay.
+- **Takes the designer's own G-code at a layer out, and shows it.** A project can carry G-code typed in at a layer
+  (a Custom item in its layer list), and the slicer would write it into the print as it stands. `inspect` and
+  `convert` print its text; `--keep-custom-gcode` keeps it, and the check then reads it like every other line.
+- **Makes one file per plate when the 5M needs more than one.** A layout made for a 256 mm bed can need two 220 mm
+  plates. Each becomes its own project, `pt1-model-ad5m.3mf` and `pt2-model-ad5m.3mf`, arranged, sliced and checked
+  on a bed of its own, with only its own plate's pauses. A job is one set of files: converting it again into the same
+  folder removes what its earlier run left there, and says so.
 - **Uses a filament Flash Studio can select.** The default is `Generic PLA @System` (220 °C, 55 °C on the textured
   plate). `Flashforge Generic PLA` is a base preset the app does not offer, and a project naming it opens as an
   unknown preset, so it is refused. `--filament` takes any other name Flash Studio lists for the 5M 0.4.
@@ -49,10 +56,13 @@ the G-code to the Adventurer 5M:
 
 - the printer model, the 0.4 nozzle, Klipper flavour, the −110..110 mm bed and the 220 mm height;
 - every XY move inside the bed, with arcs checked at the extremes they sweep through and relative moves resolved;
-- no Bambu-only commands, and no tool but `T0`;
+- no Bambu-only commands, no tool but `T0`, and no command an AD5M slice never carries, with every line read the way
+  the 5M's Klipper reads it (`M104S400`, `N10 M104 S400` and `m104 s400` are all a nozzle command);
 - nozzle ≤ 280 °C, bed ≤ 110 °C, ≤ 600 mm/s, ≤ 20 000 mm/s², and the bed temperature equal to the preset's
   value for the plate in use;
-- filament actually used, summed over every slot.
+- filament actually used, summed over every slot;
+- a bridge over air longer than the slicer's own 10 mm is reported by part, length and height. It is not a failure:
+  supports under that one part fix it (`--object-set`, below).
 
 Only a project whose every plate passes is written, and it is written **without G-code**: Flash Studio slices it
 again when you open it. The temporary folder is then deleted. If the check fails or the slicer crashes, nothing
@@ -103,13 +113,17 @@ Options for `convert`:
 |---|---|
 | `--process 0.12\|0.20\|0.24` | layer height preset (default 0.20 Standard) |
 | `--filament NAME` | a filament preset Flash Studio offers for the 5M 0.4 |
-| `--set KEY=VALUE` | a decision about the part, such as `brim_type=auto_brim`, `sparse_infill_density=0%` or `wall_loops=3`. Temperatures, speeds, accelerations, flow and fan are refused: those belong to the presets |
+| `--set KEY=VALUE` | a setting of the part (walls, shells, infill, surfaces, seam, brim, skirt, supports, ironing, fuzzy skin), such as `brim_type=auto_brim`, `sparse_infill_density=0%` or `wall_loops=3`. The machine's, the filament's and the file's settings are refused: temperatures, speeds, accelerations, flow and fan belong to the presets |
+| `--object-set 'NAME:KEY=VALUE'` | one object's own setting, the way Flash Studio's Add settings writes it, under the same rule as `--set`. Grid supports from the bed under the one part with a long bridge: `--object-set 'lid.stl:support_type=normal(auto)' --object-set 'lid.stl:support_on_build_plate_only=1'` |
 | `--scale F` | uniform scale, only when you ask for it. `inspect` reports a part larger than the 220 mm bed, and the check fails a plate that leaves it |
-| `--plate N` | one plate (default: all) |
 | `--name STEM`, `--out DIR` | output name and folder |
 | `--from-mesh` | slice the project's mesh taken out whole, for a project file Flash Studio's command line crashes on. One STL per piece: parts that sit clear of each other stay separate objects, nested parts stay in one STL. Per-object settings, modifiers, painted supports and layer changes do not travel, and the tool names what was lost |
 | `--keep-merged` | leave an object that is really several parts welded into one. Off by default: the pieces are put back on their own feet |
+| `--keep-custom-gcode` | keep the designer's own G-code at a layer (taken out by default) |
 | `--keep` | keep the temporary folder |
+
+Every plate is converted. An unknown option is refused (`--plate` is gone), an option that takes a value refuses a
+missing one, a switch never takes the next word as its value, and `--name` must be a plain file name.
 
 Other commands:
 
@@ -137,7 +151,10 @@ Read the check and the drawing of the first layer, and press **open in Flash Stu
 line crashes on the project, the page offers **retry from the mesh alone**.
 
 The app listens on loopback only, refuses any request whose Host header is not localhost, and reads and writes
-only inside the work folder. It never talks to a printer.
+only inside the work folder, with links followed before a path is held to it. A page on another site cannot drive it
+from your browser: every request that does something carries a header only the app's own page sends, and an Origin,
+when the browser sends one, has to be the page's own. A body has a size limit, a choice the page does not offer is
+refused, and one slice runs at a time. It never talks to a printer.
 
 A desktop entry, if you want an icon (adjust the path):
 
