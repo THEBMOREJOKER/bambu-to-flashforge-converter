@@ -347,7 +347,8 @@ try {
                      --scale F (every direction)  --scale-z F (same footprint, F times as thick)
                      --from-mesh (when the slicer crashes on the project)  --keep (keep the work folder)
                      --keep-merged (leave an object that is really several parts welded into one)
-                     --keep-custom-gcode (keep the designer's own G-code at a layer; taken out by default)
+                     --keep-custom-gcode (keep the designer's own G-code at a layer, checked where it runs; taken out
+                       by default, its text shown either way)
   open FILE.3mf      open a finished project in Flash Studio, to slice and print from there`);
       code = command ? 1 : 0;
   }

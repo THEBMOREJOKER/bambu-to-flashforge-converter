@@ -12,12 +12,12 @@
  */
 import {
   closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync,
-  writeSync,
+  writeFileSync, writeSync,
 } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 import { APPIMAGE, BED_Z, DATADIR, DEFAULT_FILAMENT, MACHINE_JSON, OUTDIR, PROCESS, PROFILES, SSL_CERT } from "./machine.js";
 import {
@@ -37,6 +37,7 @@ import {
   type Broken, stripBreaks,
 } from "./threemf.js";
 import { copyZipWith } from "./zipwrite.js";
+import { type CustomItem, customItems, LAYERS, placeInSlice, placementsFor, withCustomItems } from "./customgcode.js";
 import { Zip } from "./zip.js";
 
 export interface ConvertOptions {
@@ -64,7 +65,10 @@ export interface ConvertOptions {
   overrides?: string[];
   /** NAME:KEY=VALUE — a setting for one object alone, as Flash Studio's "Add settings" makes it: supports under the one part that needs them. */
   objectSets?: string[];
-  /** Keep the designer's own G-code at a layer. Off by default: it is taken out, and its text is shown. */
+  /**
+   * Keep the designer's own G-code at a layer: it goes back into the saved project, and into the proof slice at the
+   * layer Flash Studio writes it at, where the check reads it. Off by default: it is taken out, and its text is shown.
+   */
   keepCustomGcode?: boolean;
   dryRun?: boolean;
   /** Every line the slicer prints, as it prints it — the GUI shows these live. */
@@ -343,6 +347,9 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
   let project: Record<string, string | string[]> | null = null;
   let broken: Broken[] = [];
   let collapse: Collapse | null = null;
+  // The designer's own G-code at a layer, when it is kept: the slicer's command line erases it (--skip-modified-gcodes),
+  // so it is carried here, by plate, to every proof slice and every project saved.
+  let keptCustom: CustomItem[] = [];
   let modelXml: string | null = null;
   let carried: ObjectSetting[] = [];
   let merged: ObjectSetting[] = [];
@@ -364,6 +371,7 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
           if (broken.length) project = stripped.settings;
         }
         collapse = collapseFilaments(zip, Boolean(options.keepCustomGcode));
+        if (options.keepCustomGcode && zip.has(LAYERS)) keptCustom = customItems(zip.readText(LAYERS));
         modelXml = modelSettings(zip);
         const ids = project?.["filament_settings_id"];
         if (Array.isArray(ids) && ids.length) slots = ids.length;
@@ -506,7 +514,7 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
   }
   for (const k of collapse?.kept ?? []) options.onLine?.(`the project's ${k} is kept`);
   for (const c of collapse?.custom ?? []) {
-    options.onLine?.(`the designer's own G-code ${c.at}, ${c.kept ? "kept, and the check reads it" : "taken out (--keep-custom-gcode keeps it)"}: ${oneLine(c.text)}`);
+    options.onLine?.(`the designer's own G-code ${c.at}, ${c.kept ? "kept: it goes back into the saved project and into the proof slice at its layer, where the check reads it" : "taken out (--keep-custom-gcode keeps it)"}: ${oneLine(c.text)}`);
   }
   for (const b of broken) {
     options.onLine?.(`line break taken out of ${b.key}${b.slot ? ` slot ${b.slot}` : ""} in the copy the slicer reads — it would have become a command above the start block: ${b.text}`);
@@ -624,7 +632,14 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
   }
 
   progress("check", 94, plates.length > 1 ? `checking ${plates.length} plates against the 5M` : "checking the plate against the 5M");
-  const checks = plates.map((p) => check(join(work, p), exportedObjects(join(work, exported), p)));
+  const exportedLayers = layersOf(join(work, exported));
+  for (const plate of new Set(keptCustom.map((i) => i.plate))) {
+    if (!plates.includes(`plate_${plate}.gcode`)) {
+      options.onLine?.(`the designer's own G-code on plate ${plate}: the slice has no plate ${plate} after arranging, so there is no plate to write it on — it is not carried`);
+    }
+  }
+  const checks = plates.map((p) =>
+    check(withDesignerGcode(join(work, p), exportedLayers, keptCustom, options.onLine), exportedObjects(join(work, exported), p)));
   const maps = plates.map((p) => plateMap(join(work, p)));
   let worst = checks.some((c) => c.code === 2) ? 2 : 0;
 
@@ -639,13 +654,18 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
     const zip = new Zip(join(work, exported));
     try {
       if (zip.has("Metadata/model_settings.config")) layout = platesOf(zip.readText("Metadata/model_settings.config"));
-      for (const p of layout) copyZipWith(zip, join(work, `pt${p.plate}-input.3mf`), onePlateChanges(zip, p.plate, p.objects));
+      for (const p of layout) {
+        const changes = onePlateChanges(zip, p.plate, p.objects);
+        const mine = partItems(keptCustom, p.plate);
+        if (mine.length) changes[LAYERS] = Buffer.from(withCustomItems(changes[LAYERS]?.toString("utf8") ?? null, 1, mine));
+        copyZipWith(zip, join(work, `pt${p.plate}-input.3mf`), changes);
+      }
     } finally {
       zip.close();
     }
     if (layout.length !== plates.length) partFailure = `the project names ${layout.length} plate(s) for ${plates.length} sliced`;
     const at = command.indexOf("--outputdir");
-    const staged: Array<{ dir: string; name: string }> = [];
+    const staged: Array<{ dir: string; name: string; plate: number }> = [];
     for (const p of partFailure ? [] : layout) {
       const name = `pt${p.plate}-${stem}-ad5m.3mf`;
       const dir = join(work, `pt${p.plate}`);
@@ -662,23 +682,24 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
           + String(partRun.result["error_string"] ?? "no result");
         break;
       }
-      const partCheck = check(join(dir, gcodes[0] ?? ""), exportedObjects(join(dir, name), gcodes[0] ?? ""));
+      const partGcode = withDesignerGcode(join(dir, gcodes[0] ?? ""), layersOf(join(dir, name)), partItems(keptCustom, p.plate), options.onLine);
+      const partCheck = check(partGcode, exportedObjects(join(dir, name), gcodes[0] ?? ""));
       checks.push(partCheck);
       if (partCheck.code === 2) {
         partFailure = `${name} failed the check`;
         break;
       }
-      staged.push({ dir, name });
+      staged.push({ dir, name, plate: p.plate });
     }
     if (partFailure) {
       worst = 2;
     } else {
       mkdirSync(out, { recursive: true });
-      for (const { dir, name } of staged) {
+      for (const { dir, name, plate } of staged) {
         const part = join(out, `${name}.part`);
         const from = new Zip(join(dir, name));
         try {
-          copyZipWith(from, part, unslicedChanges(from));
+          copyZipWith(from, part, withKeptCustom(from, unslicedChanges(from), [1], partItems(keptCustom, plate)));
         } finally {
           from.close();
         }
@@ -700,7 +721,8 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
         progress("save", 97, "writing the project for Flash Studio");
         mkdirSync(out, { recursive: true });
         const part = `${project3mf}.part`;
-        copyZipWith(zip, part, unslicedChanges(zip));
+        const sliced = plates.map((p) => Number(/^plate_(\d+)\.gcode$/.exec(p)?.[1] ?? 0));
+        copyZipWith(zip, part, withKeptCustom(zip, unslicedChanges(zip), sliced, keptCustom));
         renameSync(part, project3mf);
         delivered = true;
       }
@@ -747,6 +769,61 @@ const oneLine = (text: string) => {
  * The files of this job in `out` other than the ones just written: `<stem>-ad5m.3mf` and `pt<N>-<stem>-ad5m.3mf`, by
  * exact name. A job is its stem; no other file is touched.
  */
+/** The layer list a project carries, or null. */
+function layersOf(project: string): string | null {
+  if (!existsSync(project)) return null;
+  const zip = new Zip(project);
+  try {
+    return zip.has(LAYERS) ? zip.readText(LAYERS) : null;
+  } finally {
+    zip.close();
+  }
+}
+
+/** The kept items of one plate, as the project cut to that plate numbers them: plate 1. */
+function partItems(items: readonly CustomItem[], plate: number): CustomItem[] {
+  return items.filter((i) => i.plate === plate).map((i) => ({ ...i, plate: 1 }));
+}
+
+/**
+ * The slice to check: the slice itself, or, when the designer's own G-code is kept for its plate, a copy beside it
+ * with that G-code written where Flash Studio writes it, so the check reads every line of it. Each item's place is
+ * said, and so is an item Flash Studio would not write.
+ */
+function withDesignerGcode(path: string, layersXml: string | null, items: readonly CustomItem[],
+  onLine?: (line: string) => void): string {
+  const plate = Number(/plate_(\d+)\.gcode$/.exec(basename(path))?.[1] ?? 0);
+  if (!items.some((i) => i.plate === plate)) return path;
+  const gcode = readFileSync(path, "utf8");
+  const placements = placementsFor(gcode, layersXml, plate, items);
+  const part = basename(dirname(path));
+  const where = /^pt\d+$/.test(part) ? `${part}'s slice` : basename(path);
+  for (const p of placements) {
+    onLine?.(p.layer === null
+      ? `the designer's own G-code at ${p.item.z} mm is not placed: ${p.why}: ${oneLine(p.item.text)}`
+      : `the designer's own G-code at ${p.item.z} mm runs at the start of layer Z ${p.layer} in ${where}, and the check reads it there: ${oneLine(p.item.text)}`);
+  }
+  const dir = join(dirname(path), "with-designer-gcode");
+  mkdirSync(dir, { recursive: true });
+  const placed = join(dir, basename(path));
+  writeFileSync(placed, placeInSlice(gcode, placements));
+  return placed;
+}
+
+/** A saved project's changes, with the designer's kept G-code written back into the plates given. */
+function withKeptCustom(zip: Zip, changes: Record<string, Buffer | null>, plates: readonly number[],
+  items: readonly CustomItem[]): Record<string, Buffer | null> {
+  let xml = zip.has(LAYERS) ? zip.readText(LAYERS) : null;
+  let changed = false;
+  for (const plate of plates) {
+    const mine = items.filter((i) => i.plate === plate);
+    if (!mine.length) continue;
+    xml = withCustomItems(xml, plate, mine);
+    changed = true;
+  }
+  return changed && xml !== null ? { ...changes, [LAYERS]: Buffer.from(xml) } : changes;
+}
+
 export function staleOutputs(out: string, stem: string, written: readonly string[]): string[] {
   if (!existsSync(out)) return [];
   const keep = new Set(written.map((p) => basename(p)));

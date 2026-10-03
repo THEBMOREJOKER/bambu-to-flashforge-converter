@@ -15,7 +15,7 @@ const NAMED_ENTITIES: Record<string, string> = {
   mdash: "—", ndash: "–", hellip: "…", deg: "°",
 };
 
-function unescapeOnce(text: string): string {
+export function unescapeOnce(text: string): string {
   return text.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (whole, body: string) => {
     if (body.startsWith("#")) {
       const code = body[1] === "x" || body[1] === "X"
@@ -202,7 +202,7 @@ const LAYER_KIND: Record<string, string> = {
   "0": "colour change", "1": "pause", "2": "tool change", "3": "template", "4": "custom G-code",
 };
 
-function attr(tag: string, name: string): string {
+export function attr(tag: string, name: string): string {
   // Bambu writes `error_code ="…"` with a space before the equals sign.
   return new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`).exec(tag)?.[1] ?? "";
 }
