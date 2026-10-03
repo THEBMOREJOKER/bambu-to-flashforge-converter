@@ -19,9 +19,13 @@ b2f convert ~/3dprint/in/model.3mf    →    ~/3dprint/out/model-ad5m.3mf    →
   colours at a layer. The slicer would write that as tool changes the 5M cannot make. Every object and part moves to
   slot 1, every per-slot list is cut to one slot, and tool and colour changes are taken out and listed. Add a pause
   in Flash Studio if you want the colour change back. Pauses the designer set stay.
-- **Takes the designer's own G-code at a layer out, and shows it.** A project can carry G-code typed in at a layer
-  (a Custom item in its layer list), and the slicer would write it into the print as it stands. `inspect` and
-  `convert` print its text; `--keep-custom-gcode` keeps it, and the check then reads it like every other line.
+- **Shows the designer's own G-code at a layer, and keeps it when you ask.** A designer can type G-code at a layer (a
+  Custom item in the layer list) for a reason: a temperature tower's steps, a magnet at a height. `inspect` and
+  `convert` print its text, and `convert` takes it out unless `--keep-custom-gcode` keeps it. Flash Studio's command
+  line erases such items when it runs with `--skip-modified-gcodes`, the switch that keeps a Bambu project's own start
+  and end G-code off the 5M, so a kept item is written back into the saved project and placed into the proof slice
+  where Flash Studio writes it (the nearest layer, one a layer). The check reads every line of it before anything is
+  saved, and an item Flash Studio would not write is reported.
 - **Makes one file per plate when the 5M needs more than one.** A layout made for a 256 mm bed can need two 220 mm
   plates. Each becomes its own project, `pt1-model-ad5m.3mf` and `pt2-model-ad5m.3mf`, arranged, sliced and checked
   on a bed of its own, with only its own plate's pauses. A job is one set of files: converting it again into the same
@@ -119,7 +123,7 @@ Options for `convert`:
 | `--name STEM`, `--out DIR` | output name and folder |
 | `--from-mesh` | slice the project's mesh taken out whole, for a project file Flash Studio's command line crashes on. One STL per piece: parts that sit clear of each other stay separate objects, nested parts stay in one STL. Per-object settings, modifiers, painted supports and layer changes do not travel, and the tool names what was lost |
 | `--keep-merged` | leave an object that is really several parts welded into one. Off by default: the pieces are put back on their own feet |
-| `--keep-custom-gcode` | keep the designer's own G-code at a layer (taken out by default) |
+| `--keep-custom-gcode` | keep the designer's own G-code at a layer: written back into the saved project and checked where Flash Studio runs it (taken out by default) |
 | `--keep` | keep the temporary folder |
 
 Every plate is converted. An unknown option is refused (`--plate` is gone), an option that takes a value refuses a
