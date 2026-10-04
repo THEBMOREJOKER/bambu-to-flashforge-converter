@@ -21,7 +21,8 @@ b2f convert ~/3dprint/in/model.3mf    →    ~/3dprint/out/model-ad5m.3mf    →
   differ from the preset's, whether the designer set them or their slicer's defaults did. Every other support setting
   the designer changed stays too, such as the gap between the supports and the part. `convert` prints each kept value
   beside the preset's. The layer height comes from `--process`, and temperatures, speeds, accelerations, flow, fans
-  and line widths are always the 5M preset's.
+  and line widths come from the 5M preset. A setting the designer put on one object alone rides along with that
+  object, as below. With `--from-mesh` the project's settings are not read, so none of this is kept.
 - **Collapses the project onto the 5M's one extruder.** A Bambu project may put an object on AMS slot 10 and switch
   colours at a layer. The slicer would write that as tool changes the 5M cannot make. Every object and part moves to
   slot 1, every per-slot list is cut to one slot, and tool and colour changes are taken out and listed. Add a pause
@@ -131,7 +132,7 @@ Options for `convert`:
 | `--set KEY=VALUE` | a setting of the part (walls, shells, infill, surfaces, seam, brim, skirt, supports, ironing, fuzzy skin), such as `brim_type=auto_brim`, `sparse_infill_density=0%` or `wall_loops=3`. The machine's, the filament's and the file's settings are refused: temperatures, speeds, accelerations, flow and fan belong to the presets |
 | `--object-set 'NAME:KEY=VALUE'` | one object's own setting, the way Flash Studio's Add settings writes it, under the same rule as `--set`. Grid supports from the bed under the one part with a long bridge: `--object-set 'lid.stl:enable_support=1' --object-set 'lid.stl:support_type=normal(auto)' --object-set 'lid.stl:support_on_build_plate_only=1'`. `enable_support=1` is what turns them on when the project's own supports are off: the type alone makes none |
 | `--scale F` | uniform scale, only when you ask for it. `inspect` reports a part larger than the 220 mm bed, and the check fails a plate that leaves it |
-| `--scale-z F` | F times as thick on the same footprint: the height alone is scaled. A project only: not a bare mesh, not with `--from-mesh`, and not while parts merged into one object are being taken apart (convert once and thicken that file, or add `--keep-merged`) |
+| `--scale-z F` | F times as thick on the same footprint: the height alone is scaled. A project only: not a bare mesh, not with `--from-mesh`, and not while parts merged into one object are being taken apart (convert once and thicken that file, or add `--keep-merged`). Refused when the part would stand taller than the bed's 220 mm |
 | `--name STEM`, `--out DIR` | output name and folder |
 | `--from-mesh` | slice the project's mesh taken out whole, for a project file Flash Studio's command line crashes on. One STL per piece: parts that sit clear of each other stay separate objects, nested parts stay in one STL. Per-object settings, modifiers, painted supports and layer changes do not travel, and the tool names what was lost |
 | `--keep-merged` | leave an object that is really several parts welded into one. Off by default: the pieces are put back on their own feet |
@@ -148,7 +149,7 @@ Other commands:
 ```bash
 b2f check FILE.gcode                      # hold any G-code to the 5M (exit 2 = do not print it)
 b2f split PROJECT.3mf                     # disconnected shells per object
-b2f split PROJECT.3mf --split 3           # one STL per shell of object 3
+b2f split PROJECT.3mf --split 3           # one STL per shell of object 3, every other object whole
 b2f split PROJECT.3mf --split none        # every object whole; a piece that sits clear of the rest is its own STL
                                           # the STLs go to ~/3dprint/in/NAME-split, or --out DIR; --min-tris N sets
                                           # how small a shell is no part of its own (default 20 triangles)
@@ -179,9 +180,9 @@ from your browser: every request that does something carries a header only the a
 when the browser sends one, has to be the page's own. A body has a size limit, a choice the page does not offer is
 refused, and one slice runs at a time. It never talks to a printer.
 
-`bin/b2f-app` leaves the app running and writes its output to `~/.cache/b2f.log`; stop it with
-`pkill -f "[c]li.js gui"`. `gui --port N` or `B2F_PORT` moves the port, `B2F_NODE` names the node binary, and
-`B2F_NO_OPEN=1` starts the app without opening the browser.
+`bin/b2f-app` leaves the app running and writes its output to `b2f.log` under `$XDG_CACHE_HOME`, or `~/.cache`;
+stop it with `pkill -f "[c]li.js gui"`. `gui --port N` moves the port. The launcher reads `B2F_PORT` for the same,
+`B2F_NODE` for the node binary, and `B2F_NO_OPEN=1` to start the app without opening the browser.
 
 A desktop entry, if you want an icon (adjust the path):
 
