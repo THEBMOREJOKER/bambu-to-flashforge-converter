@@ -108,7 +108,13 @@ export interface ConvertResult {
   workKept: boolean;
   /** Plate G-code names. The G-code itself is only the check's evidence and goes with the work folder. */
   plates: string[];
+  /** The checks that decide: the plate's own, or with more than one plate, each pt file's. */
   checks: CheckResult[];
+  /**
+   * With more than one plate, the check of the layout the slicer laid out first. It never prints: each plate is sliced
+   * and checked again on a bed of its own, and those checks decide.
+   */
+  layoutChecks?: CheckResult[];
   /** First layer on the bed, drawn before the G-code goes. */
   maps: PlateMap[];
   /** What the slicer itself warned about. */
@@ -633,22 +639,37 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
 
   progress("check", 94, plates.length > 1 ? `checking ${plates.length} plates against the 5M` : "checking the plate against the 5M");
   const exportedLayers = layersOf(join(work, exported));
-  for (const plate of new Set(keptCustom.map((i) => i.plate))) {
-    if (!plates.includes(`plate_${plate}.gcode`)) {
-      options.onLine?.(`the designer's own G-code on plate ${plate}: the slice has no plate ${plate} after arranging, so there is no plate to write it on — it is not carried`);
-    }
-  }
-  const checks = plates.map((p) =>
+  // A kept item whose plate is gone after arranging has nothing to run on, and it was asked for: the job stops.
+  const lost = [...new Set(keptCustom.map((i) => i.plate))].filter((plate) => !plates.includes(`plate_${plate}.gcode`));
+  const customFailure = lost.length
+    ? `the designer's own G-code on plate ${lost.join(", ")} has no plate after arranging (the slicer laid the job out on `
+      + `${plates.length} plate(s)): ${keptCustom.filter((i) => lost.includes(i.plate)).map((i) => `${i.z} mm, ${oneLine(i.text)}`).join("; ")}`
+      + ` — convert again without --keep-custom-gcode, and add it by hand in Flash Studio at that height on the plate that`
+      + ` holds the parts it was meant for (--no-arrange keeps the designer's plates only when they already sit on the 5M's`
+      + ` bed, and a Bambu project's do not)`
+    : "";
+  if (customFailure) options.onLine?.(customFailure);
+  const firstChecks = plates.map((p) =>
     check(withDesignerGcode(join(work, p), exportedLayers, keptCustom, options.onLine), exportedObjects(join(work, exported), p)));
   const maps = plates.map((p) => plateMap(join(work, p)));
-  let worst = checks.some((c) => c.code === 2) ? 2 : 0;
+  const next = afterFirstSlice(plates.length, firstChecks.some((c) => c.code === 2), Boolean(customFailure));
+  // One plate: its check decides. More than one: the layout the slicer laid out first never prints; each pt file is
+  // sliced and checked on a bed of its own below, and those checks decide.
+  const checks = plates.length > 1 ? [] : firstChecks;
+  const layoutChecks = plates.length > 1 ? firstChecks : [];
+  for (const [n, c] of layoutChecks.entries()) {
+    if (c.code === 2) {
+      options.onLine?.(`the layout the slicer laid out first fails the check on plate ${n + 1} (${c.failures[0] ?? ""}); it never prints — each plate is sliced and checked on a bed of its own`);
+    }
+  }
+  let worst = next === "stop" ? 2 : 0;
 
   // More than one plate: one project per plate (pt1-, pt2-, …), each arranged and sliced again on a bed of its own, so
   // no file carries a second plate and every part is checked as the file that prints it.
   const parts: string[] = [];
   let partFailure = "";
   const partWarnings: string[] = [];
-  if (worst === 0 && plates.length > 1 && existsSync(join(work, exported))) {
+  if (next === "split" && existsSync(join(work, exported))) {
     progress("save", 95, `${plates.length} plates: one file per plate`);
     let layout: ReturnType<typeof platesOf> = [];
     const zip = new Zip(join(work, exported));
@@ -742,7 +763,9 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
   for (const w of slicerWarnings) options.onLine?.(`Flash Studio warns: ${w}`);
   progress("done", delivered ? 100 : last, delivered ? "saved for Flash Studio" : worst === 2 ? "a plate failed the check" : "no project was written");
 
-  const advice = partFailure
+  const advice = customFailure
+    ? `${customFailure}. Nothing was written to ${out}; the slice is in ${work}`
+    : partFailure
     ? `${partFailure} — nothing was written to ${out}; the slices are in ${work}`
     : worst === 2
     ? `a plate failed the check — nothing was written to ${out}; the slice is in ${work}`
@@ -751,7 +774,7 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
     ...base, ...(parts.length ? { project3mf: parts[0] ?? project3mf, parts } : {}),
     ...(removed.length ? { removed } : {}),
     delivered, workKept: finish(Boolean(options.keep) || !delivered),
-    plates, checks, maps, slicerWarnings,
+    plates, checks, ...(layoutChecks.length ? { layoutChecks } : {}), maps, slicerWarnings,
     cliExit: run.exit, cliSignal: run.signal, errorString,
     ...(droppedKeys ? { droppedKeys } : {}),
     ...(advice ? { advice } : {}),
@@ -769,6 +792,16 @@ const oneLine = (text: string) => {
  * The files of this job in `out` other than the ones just written: `<stem>-ad5m.3mf` and `pt<N>-<stem>-ad5m.3mf`, by
  * exact name. A job is its stem; no other file is touched.
  */
+/**
+ * What follows the first slice: one plate goes on to be saved if its check passed; more than one is cut into pt files
+ * whatever the first layout's check said, because that layout never prints; a kept G-code with no plate stops the job.
+ */
+export function afterFirstSlice(plates: number, firstFailed: boolean, customFailure: boolean): "single" | "split" | "stop" {
+  if (customFailure) return "stop";
+  if (plates > 1) return "split";
+  return firstFailed ? "stop" : "single";
+}
+
 /** The layer list a project carries, or null. */
 function layersOf(project: string): string | null {
   if (!existsSync(project)) return null;

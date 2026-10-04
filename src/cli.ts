@@ -253,8 +253,14 @@ async function cmdConvert(argv: string[]): Promise<number> {
     if (result.workKept && result.work) console.log(`work folder kept: ${result.work}`);
     return result.code;
   }
-  for (const r of result.checks) {
-    console.log(`\n--- check ${r.file}`);
+  if (result.layoutChecks?.length) {
+    console.log("\n--- the layout the slicer laid out first: it never prints, each plate is checked below on a bed of its own");
+    for (const [i, r] of result.layoutChecks.entries()) {
+      console.log(r.code === 2 ? warn(`plate ${i + 1}: ${r.failures.join("; ")}`) : ok(`plate ${i + 1}: clean`));
+    }
+  }
+  for (const [i, r] of result.checks.entries()) {
+    console.log(`\n--- check ${result.layoutChecks?.length ? `pt${i + 1}, ` : ""}${r.file}`);
     printCheckResult(r);
   }
   for (const w of result.slicerWarnings) console.log(warn(`Flash Studio warns: ${w}`));

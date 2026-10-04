@@ -757,6 +757,10 @@ function renderVerdict(r) {
     ? stamp("bad", "Nothing was saved", r.advice || "the checks passed, but no file was written")
     : stamp("ok", "Fit to print", "Sliced for the Adventurer 5M 0.4 · " + passed + " checks passed" +
       (warned ? " · read the " + (warned === 1 ? "warning" : warned + " warnings") + " below" : "")));
+  (r.layoutChecks || []).forEach((c, n) => {
+    if (c.code === 2) box.appendChild(flag("warn", "The layout the slicer laid out first fails on plate " + (n + 1) +
+      ". It never prints: each plate below was sliced and checked on a bed of its own."));
+  });
   r.checks.forEach((c, n) => {
     if (r.checks.length > 1) box.appendChild(el("h3", null, "Plate " + (n + 1)));
     box.appendChild(readouts(c.facts));

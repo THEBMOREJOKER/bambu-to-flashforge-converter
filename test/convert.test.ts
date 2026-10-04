@@ -7,7 +7,7 @@ import { basename, join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { convert, plateWarningsOf, runCli, type SlicerReport, staleOutputs } from "../src/convert.js";
+import { afterFirstSlice, convert, plateWarningsOf, runCli, type SlicerReport, staleOutputs } from "../src/convert.js";
 import { APPIMAGE, MACHINE_JSON } from "../src/machine.js";
 import { withZip } from "../src/zip.js";
 import { writeZip } from "../src/zipwrite.js";
@@ -183,4 +183,15 @@ test("convert refuses a name that is not a plain file name", { skip: !existsSync
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("after the first slice: one plate is saved only if it passed, more than one is always cut into checked pt files, and a kept G-code with no plate stops the job", () => {
+  assert.equal(afterFirstSlice(1, false, false), "single");
+  assert.equal(afterFirstSlice(1, true, false), "stop");
+  // The first layout of two plates never prints: a plate hanging off it is what the pt files are for.
+  assert.equal(afterFirstSlice(2, true, false), "split");
+  assert.equal(afterFirstSlice(2, false, false), "split");
+  // A designer's G-code kept for a plate the arrange took away.
+  assert.equal(afterFirstSlice(1, false, true), "stop");
+  assert.equal(afterFirstSlice(2, false, true), "stop");
 });
