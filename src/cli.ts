@@ -8,6 +8,7 @@
  *   split PROJECT.3mf  shells and pieces per object; --split ID… one STL per shell, every other object whole
  *   convert INPUT…     turn a Bambu project (or meshes) into a Flash Studio project for the AD5M 0.4, checked
  *   open FILE.3mf      open a finished project in Flash Studio, to slice and print from there
+ *   gui                the app: one page on loopback
  */
 import { basename } from "node:path";
 
@@ -248,6 +249,11 @@ async function cmdConvert(argv: string[]): Promise<number> {
   if (result.droppedKeys?.length) console.log(warn(`dropped out-of-range keys: ${result.droppedKeys.join(", ")}`));
   for (const n of result.notCarried ?? []) console.log(warn(`not carried from the project: ${n}`));
   if (!result.plates.length) {
+    if (flags.has("dry-run") && result.code === 0) {
+      console.log("dry run: the slicer was not started, and nothing was saved");
+      if (result.workKept && result.work) console.log(`work folder kept: ${result.work}`);
+      return result.code;
+    }
     console.log(bad(result.errorString));
     if (result.advice) console.log(`\n${result.advice}${result.meshRetry ? " (--from-mesh)" : ""}`);
     if (result.workKept && result.work) console.log(`work folder kept: ${result.work}`);
@@ -345,17 +351,25 @@ try {
   check FILE.gcode   hold a G-code to the printer's ratings; exit 2 = do not print it (read-only)
   split PROJECT.3mf  shells and pieces per object; --split ID… one STL per shell, every other object whole
                      (--split none: all whole — but a piece that sits clear of the rest is still its own STL)
+                     --out DIR (default ~/3dprint/in/NAME-split)  --min-tris N (a shell of fewer triangles is not
+                       a part of its own; default 20)
   convert INPUT…     turn a Bambu project (or meshes) into a Flash Studio project for the AD5M 0.4, checked;
-                     one .3mf lands in the out folder (~/3dprint/out/ by default), the proof slice is thrown away
+                     one .3mf lands in the out folder (~/3dprint/out/ by default; one per plate, pt1-, pt2-, when
+                     the 5M needs more than one), the proof slice is thrown away
                      --process 0.12|0.20|0.24  --filament NAME  --set KEY=VALUE  --name STEM  --out DIR
                      --object-set 'NAME:KEY=VALUE' (one object alone, as Flash Studio's Add settings — e.g. supports
-                       under the one part with a long bridge: 'lid.stl:support_type=normal(auto)')
+                       under the one part with a long bridge: 'lid.stl:enable_support=1' with
+                       'lid.stl:support_type=normal(auto)')
                      --scale F (every direction)  --scale-z F (same footprint, F times as thick)
                      --from-mesh (when the slicer crashes on the project)  --keep (keep the work folder)
                      --keep-merged (leave an object that is really several parts welded into one)
                      --keep-custom-gcode (keep the designer's own G-code at a layer, checked where it runs; taken out
                        by default, its text shown either way)
-  open FILE.3mf      open a finished project in Flash Studio, to slice and print from there`);
+                     --no-arrange (leave the parts where the file has them: only for a file already laid out on the
+                       5M's bed; a job of more than one plate is still arranged, each pt file on a bed of its own)
+                     --dry-run (say what the conversion would change; no slice, nothing saved)
+  open FILE.3mf      open a finished project in Flash Studio, to slice and print from there
+  gui                the app, one page on 127.0.0.1:8770 (--port N; --open opens it in the browser)`);
       code = command ? 1 : 0;
   }
 } catch (err) {

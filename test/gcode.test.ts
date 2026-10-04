@@ -192,7 +192,7 @@ test("a bridge is named from the plate_N.json beside the G-code, the way Flash S
   assert.deepEqual(plateObjects(JSON.stringify({ bbox_objects: [{ name: "x", bbox: [0, 0, 1] }] })), []);
 });
 
-// Eighteen lines a check that splits on spaces passes clean, while the AD5M's firmware, Klipper, would run them as
+// Lines a check that splits on spaces passes clean, while the AD5M's firmware, Klipper, would run them as
 // written. Each line follows the same clean plate; each must fail, and say why.
 const caught = (body: string, why: RegExp) => {
   const r = check(gcode(`G1 X10 Y10 F6000\nG1 X20 Y10 E1\n${body}\n`));
@@ -200,7 +200,7 @@ const caught = (body: string, why: RegExp) => {
   assert.ok(r.failures.some((f) => why.test(f)), `${body}: ${r.failures.join(" | ")}`);
 };
 
-test("the plate the eighteen lines follow is clean on its own", () => {
+test("the plate those lines follow is clean on its own", () => {
   const r = check(gcode("G1 X10 Y10 F6000\nG1 X20 Y10 E1\n"));
   assert.equal(r.code, 0, r.failures.join("\n"));
 });

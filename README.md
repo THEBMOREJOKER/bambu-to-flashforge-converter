@@ -15,6 +15,13 @@ b2f convert ~/3dprint/in/model.3mf    →    ~/3dprint/out/model-ad5m.3mf    →
 - **Swaps the printer, process and filament** for Flash Studio's own Adventurer 5M 0.4 presets. Flash Studio's
   command line does not follow a preset's `inherits` chain on its own, so every chain is flattened first, parent
   under child. Nothing is typed in: no temperature, speed or retraction comes from this tool.
+- **Keeps how the part is built.** The swap does not take the project's settings about the part itself: the walls
+  and the wall generator, thin-wall detection, the top and bottom layers, the infill and its pattern, supports on or
+  off and their type, the brim, a raft, the seam, ironing and vase mode stay as the project has them wherever they
+  differ from the preset's, whether the designer set them or their slicer's defaults did. Every other support setting
+  the designer changed stays too, such as the gap between the supports and the part. `convert` prints each kept value
+  beside the preset's. The layer height comes from `--process`, and temperatures, speeds, accelerations, flow, fans
+  and line widths are always the 5M preset's.
 - **Collapses the project onto the 5M's one extruder.** A Bambu project may put an object on AMS slot 10 and switch
   colours at a layer. The slicer would write that as tool changes the 5M cannot make. Every object and part moves to
   slot 1, every per-slot list is cut to one slot, and tool and colour changes are taken out and listed. Add a pause
@@ -57,8 +64,8 @@ b2f convert ~/3dprint/in/model.3mf    →    ~/3dprint/out/model-ad5m.3mf    →
 
 ## How it proves the result
 
-`convert` slices the converted project once with Flash Studio's command line, in a temporary folder, and holds
-the G-code to the Adventurer 5M:
+`convert` slices the converted project with Flash Studio's command line, in a temporary folder, and holds the
+G-code to the Adventurer 5M. A job of more than one plate is sliced once more for each pt file:
 
 - the printer model, the 0.4 nozzle, Klipper flavour, the −110..110 mm bed and the 220 mm height;
 - every XY move inside the bed, with arcs checked at the extremes they sweep through and relative moves resolved;
@@ -78,8 +85,10 @@ too.
 ## Requirements
 
 - Linux and **Node.js 24** or newer.
-- **Flash Studio for Linux** (the AppImage from flashforge.com), launched once from its menu so it unpacks its
-  presets. Tested with Flash Studio 1.7.9, which is Orca-Flashforge 2.3.2 underneath.
+- **Flash Studio for Linux** (the AppImage from flashforge.com), made executable and launched once, with the
+  Adventurer 5M added in its setup, so it unpacks its presets. Tested with Flash Studio 1.7.9 (the AppImage) and with 1.7.15 built from Flashforge's published source;
+  both are Orca-Flashforge 2.3.2 underneath.
+- `curl` and `xdg-open`, for the click-to-run launcher `bin/b2f-app` only. `gui --open` uses `xdg-open` too.
 
 The tool looks for the newest `Flash*Studio*.AppImage` under `~/Applications`. Environment variables change the
 defaults:
@@ -120,13 +129,16 @@ Options for `convert`:
 | `--process 0.12\|0.20\|0.24` | layer height preset (default 0.20 Standard) |
 | `--filament NAME` | a filament preset Flash Studio offers for the 5M 0.4 |
 | `--set KEY=VALUE` | a setting of the part (walls, shells, infill, surfaces, seam, brim, skirt, supports, ironing, fuzzy skin), such as `brim_type=auto_brim`, `sparse_infill_density=0%` or `wall_loops=3`. The machine's, the filament's and the file's settings are refused: temperatures, speeds, accelerations, flow and fan belong to the presets |
-| `--object-set 'NAME:KEY=VALUE'` | one object's own setting, the way Flash Studio's Add settings writes it, under the same rule as `--set`. Grid supports from the bed under the one part with a long bridge: `--object-set 'lid.stl:support_type=normal(auto)' --object-set 'lid.stl:support_on_build_plate_only=1'` |
+| `--object-set 'NAME:KEY=VALUE'` | one object's own setting, the way Flash Studio's Add settings writes it, under the same rule as `--set`. Grid supports from the bed under the one part with a long bridge: `--object-set 'lid.stl:enable_support=1' --object-set 'lid.stl:support_type=normal(auto)' --object-set 'lid.stl:support_on_build_plate_only=1'`. `enable_support=1` is what turns them on when the project's own supports are off: the type alone makes none |
 | `--scale F` | uniform scale, only when you ask for it. `inspect` reports a part larger than the 220 mm bed, and the check fails a plate that leaves it |
+| `--scale-z F` | F times as thick on the same footprint: the height alone is scaled. A project only: not a bare mesh, not with `--from-mesh`, and not while parts merged into one object are being taken apart (convert once and thicken that file, or add `--keep-merged`) |
 | `--name STEM`, `--out DIR` | output name and folder |
 | `--from-mesh` | slice the project's mesh taken out whole, for a project file Flash Studio's command line crashes on. One STL per piece: parts that sit clear of each other stay separate objects, nested parts stay in one STL. Per-object settings, modifiers, painted supports and layer changes do not travel, and the tool names what was lost |
 | `--keep-merged` | leave an object that is really several parts welded into one. Off by default: the pieces are put back on their own feet |
 | `--keep-custom-gcode` | keep the designer's own G-code at a layer: written back into the saved project and checked where Flash Studio runs it (taken out by default) |
 | `--keep` | keep the temporary folder |
+| `--no-arrange` | leave the parts where the file has them. Only for a file already laid out on the 5M's bed: a Bambu project's plates sit outside it. A job of more than one plate is still arranged, each pt file on a bed of its own |
+| `--dry-run` | say what the conversion would change, and stop before the slicer: nothing is sliced or saved |
 
 Every plate is converted. An unknown option is refused (`--plate` is gone), an option that takes a value refuses a
 missing one, a switch never takes the next word as its value, and `--name` must be a plain file name.
@@ -136,7 +148,10 @@ Other commands:
 ```bash
 b2f check FILE.gcode                      # hold any G-code to the 5M (exit 2 = do not print it)
 b2f split PROJECT.3mf                     # disconnected shells per object
-b2f split PROJECT.3mf --split 3           # one STL per shell of object 3; --split none writes every object whole
+b2f split PROJECT.3mf --split 3           # one STL per shell of object 3
+b2f split PROJECT.3mf --split none        # every object whole; a piece that sits clear of the rest is its own STL
+                                          # the STLs go to ~/3dprint/in/NAME-split, or --out DIR; --min-tris N sets
+                                          # how small a shell is no part of its own (default 20 triangles)
 b2f state                                 # Flash Studio, presets, work folder
 ```
 
@@ -153,14 +168,20 @@ bin/b2f-app                               # starts it if needed and opens the br
 In the app: pick or drop a model and read its notes. Choose layer height, filament, brim and infill, then convert.
 A progress bar follows Flash Studio's own report, step by step (the slicer writes each step to a named pipe when
 started with `--pipe`); the command line prints the same steps as lines.
-Read the check and the drawing of the first layer, and press **open in Flash Studio**. If Flash Studio's command
+Read the check and the drawing of the first layer (the first file's, when a job makes more than one), and press
+**open in Flash Studio**. If Flash Studio's command
 line crashes on the project, the page offers **retry from the mesh alone**.
 
-The app listens on loopback only, refuses any request whose Host header is not localhost, and reads and writes
-only inside the work folder, with links followed before a path is held to it. A page on another site cannot drive it
+The app listens on loopback only, refuses any request whose Host header is not localhost, and takes only paths
+inside the work folder from a request, with links followed before a path is held to it. The slice itself runs in a
+temporary folder, as it does on the command line. A page on another site cannot drive it
 from your browser: every request that does something carries a header only the app's own page sends, and an Origin,
 when the browser sends one, has to be the page's own. A body has a size limit, a choice the page does not offer is
 refused, and one slice runs at a time. It never talks to a printer.
+
+`bin/b2f-app` leaves the app running and writes its output to `~/.cache/b2f.log`; stop it with
+`pkill -f "[c]li.js gui"`. `gui --port N` or `B2F_PORT` moves the port, `B2F_NODE` names the node binary, and
+`B2F_NO_OPEN=1` starts the app without opening the browser.
 
 A desktop entry, if you want an icon (adjust the path):
 
@@ -188,7 +209,8 @@ Categories=Graphics;3DGraphics;
 arc that bulges off the bed while both its ends sit inside, a relative move read as an absolute one, a tool change
 the 5M cannot make, a plate printed from a later slot read as empty, eleven slots left in a one-extruder project, a
 retry reading the run before it, a project handed over with G-code inside. The tests that read Flash Studio's
-installed presets skip on a machine without them.
+installed presets skip on a machine without them. The app's test makes a hidden folder under the work folder
+(`B2F_HOME`, `~/3dprint` by default) and removes it, and the work folder with it when the test was what made it.
 
 ## License
 

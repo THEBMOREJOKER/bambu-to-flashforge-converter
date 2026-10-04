@@ -882,7 +882,7 @@ $("#slice").onclick = () => slice(false);
 setupDrop();
 drawPlate(null, false);
 loadState();
-// The header reads the printer's status while the page is in view, and not while it sits in a background tab.
+// The header reads Flash Studio's state while the page is in view, and not while it sits in a background tab.
 setInterval(() => { if (document.visibilityState === "visible") loadState(); }, 20000);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") loadState(); });
 `;

@@ -44,8 +44,9 @@ test("a JSON body has a limit, and has to be JSON", async () => {
 });
 
 test("a slice is refused for a choice the page does not offer", async () => {
-  // Under the work folder, where the app looks, and never among the models: a hidden folder of its own, gone after.
-  mkdirSync(WORKDIR, { recursive: true });
+  // Under the work folder, where the app looks, and never among the models: a hidden folder of its own, gone after,
+  // and the work folder with it when this run is what made it.
+  const made = mkdirSync(WORKDIR, { recursive: true });
   const scratch = mkdtempSync(join(WORKDIR, ".b2f-test-"));
   try {
     const model = join(scratch, "m.stl");
@@ -66,5 +67,6 @@ test("a slice is refused for a choice the page does not offer", async () => {
     assert.equal(r.status, 400);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+    if (made) rmSync(made, { recursive: true, force: true });
   }
 });

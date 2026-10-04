@@ -115,7 +115,7 @@ export interface ConvertResult {
    * and checked again on a bed of its own, and those checks decide.
    */
   layoutChecks?: CheckResult[];
-  /** First layer on the bed, drawn before the G-code goes. */
+  /** First layer on the bed, drawn before the G-code goes: each pt file's own when the job is more than one plate. */
   maps: PlateMap[];
   /** What the slicer itself warned about. */
   slicerWarnings: string[];
@@ -669,6 +669,8 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
   const parts: string[] = [];
   let partFailure = "";
   const partWarnings: string[] = [];
+  /** Each pt file's own first layer: it prints, and the first layout's never does. */
+  const partMaps: PlateMap[] = [];
   if (next === "split" && existsSync(join(work, exported))) {
     progress("save", 95, `${plates.length} plates: one file per plate`);
     let layout: ReturnType<typeof platesOf> = [];
@@ -706,6 +708,7 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
       const partGcode = withDesignerGcode(join(dir, gcodes[0] ?? ""), layersOf(join(dir, name)), partItems(keptCustom, p.plate), options.onLine);
       const partCheck = check(partGcode, exportedObjects(join(dir, name), gcodes[0] ?? ""));
       checks.push(partCheck);
+      partMaps.push(plateMap(join(dir, gcodes[0] ?? "")));
       if (partCheck.code === 2) {
         partFailure = `${name} failed the check`;
         break;
@@ -774,7 +777,7 @@ async function convertIn(options: ConvertOptions, job: { work?: string }): Promi
     ...base, ...(parts.length ? { project3mf: parts[0] ?? project3mf, parts } : {}),
     ...(removed.length ? { removed } : {}),
     delivered, workKept: finish(Boolean(options.keep) || !delivered),
-    plates, checks, ...(layoutChecks.length ? { layoutChecks } : {}), maps, slicerWarnings,
+    plates, checks, ...(layoutChecks.length ? { layoutChecks } : {}), maps: partMaps.length ? partMaps : maps, slicerWarnings,
     cliExit: run.exit, cliSignal: run.signal, errorString,
     ...(droppedKeys ? { droppedKeys } : {}),
     ...(advice ? { advice } : {}),
@@ -788,10 +791,6 @@ const oneLine = (text: string) => {
   return flat.length > 200 ? `${flat.slice(0, 200)} …` : flat;
 };
 
-/**
- * The files of this job in `out` other than the ones just written: `<stem>-ad5m.3mf` and `pt<N>-<stem>-ad5m.3mf`, by
- * exact name. A job is its stem; no other file is touched.
- */
 /**
  * What follows the first slice: one plate goes on to be saved if its check passed; more than one is cut into pt files
  * whatever the first layout's check said, because that layout never prints; a kept G-code with no plate stops the job.
@@ -857,6 +856,10 @@ function withKeptCustom(zip: Zip, changes: Record<string, Buffer | null>, plates
   return changed && xml !== null ? { ...changes, [LAYERS]: Buffer.from(xml) } : changes;
 }
 
+/**
+ * The files of this job in `out` other than the ones just written: `<stem>-ad5m.3mf` and `pt<N>-<stem>-ad5m.3mf`, by
+ * exact name. A job is its stem; no other file is touched.
+ */
 export function staleOutputs(out: string, stem: string, written: readonly string[]): string[] {
   if (!existsSync(out)) return [];
   const keep = new Set(written.map((p) => basename(p)));
