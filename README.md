@@ -25,10 +25,12 @@ b2f convert ~/3dprint/in/model.3mf    →    ~/3dprint/out/model-ad5m.3mf    →
   line erases such items when it runs with `--skip-modified-gcodes`, the switch that keeps a Bambu project's own start
   and end G-code off the 5M, so a kept item is written back into the saved project and placed into the proof slice
   where Flash Studio writes it (the nearest layer, one a layer). The check reads every line of it before anything is
-  saved, and an item Flash Studio would not write is reported.
+  saved, and an item Flash Studio would not write is reported. An item whose plate the arrange takes away (two plates
+  packed onto one) stops the job with nothing saved: convert without the flag and add it in Flash Studio by hand.
 - **Makes one file per plate when the 5M needs more than one.** A layout made for a 256 mm bed can need two 220 mm
   plates. Each becomes its own project, `pt1-model-ad5m.3mf` and `pt2-model-ad5m.3mf`, arranged, sliced and checked
-  on a bed of its own, with only its own plate's pauses. A job is one set of files: converting it again into the same
+  on a bed of its own, with only its own plate's pauses. The layout the slicer lays out first is reported too, but
+  it never prints, so each part's own check decides. A job is one set of files: converting it again into the same
   folder removes what its earlier run left there, and says so.
 - **Uses a filament Flash Studio can select.** The default is `Generic PLA @System` (220 °C, 55 °C on the textured
   plate). `Flashforge Generic PLA` is a base preset the app does not offer, and a project naming it opens as an
